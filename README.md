@@ -1,7 +1,7 @@
 # usnet_sockets: Socket library for Rust using smoltcp as userspace network stack
 
 The goal of usnet_sockets is to provide a compatible drop-in for the Rust standard library types `TcpStream` and `TcpListener`. This means not only on the type level but also in terms of behavior and interaction with other programs on a Linux system.
-It is part of the master thesis [“Memory-safe Network Services Through A Userspace Networking Switch”](https://LINK-HERE), for a short version see the defense [presentation](https://LINK-HERE).
+It is part of the master thesis [“Memory-safe Network Services Through A Userspace Networking Switch”](https://pothos.github.io/papers/msc_thesis_memory-safe_network_services_userspace_switch.pdf), for a short version see the defense [presentation](https://pothos.github.io/papers/msc_thesis_memory-safe_network_services_userspace_switch_slides.pdf).
 It integrates well with the kernel loopback interface to reach programs on the local IP or be reached by other local programs.
 At runtime it accesses the NIC either through macvtap (dedicated NIC or L2 bridge), netmap (dedicated NIC or L2 bridge), or usnetd (L4 switch).
 It is intended to be used in combination with [usnetd](https://github.com/ANLAB-KAIST/usnetd), a switch system service that allows to share a NIC and IP address for multiple memory-safe network stacks and the kernel network stack.

@@ -4,10 +4,10 @@ The goal of usnet_sockets is to provide a compatible drop-in for the Rust standa
 It is part of the master thesis [“Memory-safe Network Services Through A Userspace Networking Switch”](https://LINK-HERE), for a short version see the defense [presentation](https://LINK-HERE).
 It integrates well with the kernel loopback interface to reach programs on the local IP or be reached by other local programs.
 At runtime it accesses the NIC either through macvtap (dedicated NIC or L2 bridge), netmap (dedicated NIC or L2 bridge), or usnetd (L4 switch).
-It is inteded to be used in combination with [usnetd](https://github.com/ANLAB-KAIST/usnetd), a switch system service that allows to share a NIC and IP address for multiple memory-safe network stacks and the kernel network stack.
+It is intended to be used in combination with [usnetd](https://github.com/ANLAB-KAIST/usnetd), a switch system service that allows to share a NIC and IP address for multiple memory-safe network stacks and the kernel network stack.
 This combination easily expands the memory-safety of existing Rust web services to the TCP/IP layer with low porting efforts by just changing the import statements.
 
-Code for evaluation is in the usnetd repository. While 10 GBit/s TCP transfer on a 10G NIC is possible on a fast system, a slower sytem may have a degraded performance of 2 GBit/s.
+Code for evaluation is in the usnetd repository. While 10 GBit/s TCP transfer on a 10G NIC is possible on a fast system, a slower system may have a degraded performance of 2 GBit/s.
 The single-thread version of the API could get half of the line-rate when usnetd was not used.
 Currently smoltcp does not implement several TCP aspects which would make it more robust against packet loss.
 Accepting and answering parallel short TCP connections is not as fast as with the Linux kernel network stack.
@@ -44,13 +44,13 @@ If your project just depends on a library that was ported to use `usnet_sockets`
     [patch.crates-io]
     tiny_http = { git = "https://../tiny-http" }
 
-This patching also works for dependencies of depenencies, so that you could directly do this in your own project that uses, e.g., the web framework rouille instead of doing this step first for rouille and then add the above step with rouille instead of tiny_http for your project.
+This patching also works for dependencies of dependencies, so that you could directly do this in your own project that uses, e.g., the web framework rouille instead of doing this step first for rouille and then add the above step with rouille instead of tiny_http for your project.
 
 ## Other build flags of the library
 The library has a `host` build flag just reexports the Rust standard library types. This is useful to debug code or avoid conditional compilation when porting some Rust code. However, the library still provides userspace networking types under `usnet_sockets::apimultithread::{TcpListener, TcpStream}`. Only if this would be disabled with maybe a build flag `onlyhost`, a full port to usnet_sockets would not compromise portability to non-Linux systems – this seems to be a good solution but was not implemented yet.
 
 Another build flag is `single` which uses the single-thread version of the socket types by default. It has no background thread and the socket types use no locks and cannot be moved or shared between threads.
-The full multithread-capable API is still availabe as `usnet_sockets::apimultithread::{TcpListener, TcpStream}`.
+The full multithread-capable API is still available as `usnet_sockets::apimultithread::{TcpListener, TcpStream}`.
 
 The build flags need to be used with `--no-default-features` to disable the default `multi` flag.
 
@@ -65,7 +65,7 @@ Configurations that exclusively take over the NIC from the kernel (dedicated NIC
     sudo ip link delete eth0pass
     # If you do not want to specify the interface, use "parent":"DiscoverFromRoute" to take the interface with the default route
 
-    # Now ith netmap:
+    # Now with netmap:
     USNET_SOCKETS='{"NetmapConfig":{"Interface":{"interface":{"Interface":{"netmap_name":"netmap:eth0","parent":"eth0"}},"mac":"Passthru","ipv4":"Passthru"}}}'
     # This requires the netmap kernel module, read the README.md file of usnetd for further instructions
 

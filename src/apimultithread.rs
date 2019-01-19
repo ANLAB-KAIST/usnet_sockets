@@ -92,7 +92,8 @@ pub fn bg() {
             }
             if !stcpnet.fds_remove.is_empty() {
                 for fdi in stcpnet.fds_remove.iter() {
-                    let _ = fds_extra.remove_item(fdi).unwrap();
+                    let pos = fds_extra.iter().position(|x| *x == *fdi).unwrap();
+                    let _ = fds_extra.remove(pos);
                 }
                 stcpnet.fds_remove.clear();
                 fds.clear();

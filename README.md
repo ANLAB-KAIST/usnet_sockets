@@ -107,7 +107,6 @@ The socket types will transparently listen on and connect to the loopback interf
 
 # TODO
 
-* Do not use the local ports in the range `/proc/sys/net/ipv4/ip_local_port_range`
 * UDP
 * IPv6
 * DNS (currently uses the standard library to resolve names)

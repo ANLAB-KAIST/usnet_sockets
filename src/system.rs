@@ -146,3 +146,17 @@ pub fn create_tap(ifname: &str, host_ip: &str, sub: u8) {
         ])
         .status();
 }
+
+pub fn read_kernel_local_port_range() -> (u16, u16) {
+    let mut contents = String::new();
+    {
+        let mut f = fs::File::open("/proc/sys/net/ipv4/ip_local_port_range")
+            .expect("no ipv4 port range proc file found");
+        f.read_to_string(&mut contents)
+            .expect("can not read port range file");
+    }
+    let mut splitted = contents.split_whitespace();
+    let lower = u16::from_str(splitted.next().unwrap()).expect("could not parse1");
+    let upper = u16::from_str(splitted.next().unwrap()).expect("could not parse2");
+    (lower, upper)
+}

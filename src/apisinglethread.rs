@@ -5,7 +5,6 @@
 /// calls the socket operations because otherwise packets will be lost and timeouts missed.
 /// The main purpose is evaluation of the overhead of background thread and locking
 /// in the multithread version.
-
 use smoltcp::time::Instant;
 use std::io::{self, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -33,7 +32,7 @@ use device::*;
 use std::env;
 use std::io::prelude::*;
 
-use rand;
+use rand::{thread_rng, Rng};
 
 use serde_json;
 
@@ -190,8 +189,8 @@ impl StcpNetRef {
                     }
                 }
                 _ => {
-                    while sockaddr.port() == 0 {
-                        let local_port = rand::random::<u16>();
+                    if sockaddr.port() == 0 {
+                        let local_port: u16 = 1u16 + thread_rng().gen_range(1024, std::u16::MAX);
                         sockaddr.set_port(local_port);
                     }
                 }
@@ -220,9 +219,13 @@ impl StcpNetRef {
                 let mut socket = stcpnet.sockets.get::<TcpSocket>(tcp_handle);
                 socket.listen(sockaddr.port()).unwrap();
             }
-            stcpnet
-                .iface
-                .add_port_match(ipa, sockaddr.port(), IpProtocol::Tcp)?;
+            stcpnet.iface.add_port_match(
+                ipa,
+                Some(sockaddr.port()),
+                None,
+                None,
+                IpProtocol::Tcp,
+            )?;
         }
         Ok(StcpListenerRef {
             l: Rc::new(RefCell::new(StcpListener {
@@ -248,10 +251,7 @@ impl StcpNetRef {
         {
             let mut stcpnet = self.r.borrow_mut();
 
-            let mut local_port = 0;
-            while local_port == 0 {
-                local_port = rand::random::<u16>();
-            }
+            let mut local_port: u16 = 1u16 + thread_rng().gen_range(1024, std::u16::MAX);
 
             let ipv4 = stcpnet.iface.ips()[0].address();
             match stcpnet.iface.control() {

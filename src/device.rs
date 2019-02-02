@@ -79,7 +79,9 @@ impl StcpBackendInterface {
     pub fn add_port_match(
         &mut self,
         ipa: IpAddr,
-        port: u16,
+        port: Option<u16>,
+        remote_addr: Option<IpAddr>,
+        remote_port: Option<u16>,
         protocol: IpProtocol,
     ) -> io::Result<()> {
         let ipv4 = self.ips()[0].address();
@@ -90,11 +92,12 @@ impl StcpBackendInterface {
                 } else {
                     format!("{}", ipa)
                 };
+                let remote_ip = remote_addr.map(|i| ClientMessageIp::Ipv4(format!("{}", i)));
                 let want = WantMsg {
                     dst_addr: ClientMessageIp::Ipv4(ipstr),
-                    dst_port: Some(port),
-                    src_addr: None,
-                    src_port: None,
+                    dst_port: port,
+                    src_addr: remote_ip,
+                    src_port: remote_port,
                     protocol: u8::from(protocol),
                 };
                 let payl = serde_json::to_string(&ClientMessage::AddMatch(want)).unwrap();
@@ -110,15 +113,16 @@ impl StcpBackendInterface {
                         Some(Some(true))
                     );
                     if succ != "OK".as_bytes() {
-                        return Err(io::Error::new(io::ErrorKind::Other, "port not free"));
+                        Err(io::Error::new(io::ErrorKind::Other, "port not free"))
+                    } else {
+                        Ok(())
                     }
                 } else {
-                    return Err(io::Error::new(io::ErrorKind::Other, "wrong answer"));
+                    panic!("wrong answer");
                 }
             }
-            _ => {}
+            _ => Ok(()),
         }
-        Ok(())
     }
     pub fn control(&mut self) -> Option<&mut UnixDatagram> {
         match self {

@@ -5,7 +5,6 @@
 /// multithreading application because they are movable and have locking.
 /// Since there is a background thread which handles the socket timeouts and incoming
 /// packets, the application may do longer computations without calling socket operations.
-
 use parking_lot::{Condvar, Mutex};
 use smoltcp::time::Instant;
 use std::io::{self, Write};
@@ -15,8 +14,6 @@ use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
 
-extern crate libusnetd;
-use self::libusnetd::ClientMessageIp;
 use smoltcp;
 use smoltcp::socket::SocketSet;
 use smoltcp::socket::{SocketHandle, TcpSocket, TcpSocketBuffer};
@@ -33,9 +30,10 @@ use std::os::raw::c_int;
 
 use config::*;
 use device::*;
-use rand;
+use rand::{thread_rng, Rng};
 use std::env;
 use std::io::prelude::*;
+use system::read_kernel_local_port_range;
 
 use serde_json;
 
@@ -165,6 +163,7 @@ pub struct StcpNet {
     current_wait_delay: c_int,
     socket_buffer_size: usize,
     bg_thread_pin_cpu_id: Option<usize>,
+    kernel_local_port_range: (u16, u16),
 }
 
 impl StcpNet {
@@ -253,6 +252,7 @@ impl StcpNet {
             socket_backlog: socket_backlog,
             socket_buffer_size: socket_buffer_size,
             bg_thread_pin_cpu_id: bg_thread_pin_cpu_id,
+            kernel_local_port_range: read_kernel_local_port_range(),
         }
     }
 }
@@ -269,39 +269,34 @@ impl StcpNetRef {
             let &(ref stcpnetref, ref _cond) = &*self.r;
             let mut stcpnet = stcpnetref.lock();
 
-            let ipv4 = stcpnet.iface.ips()[0].address();
-            match stcpnet.iface.control() {
-                Some(control) => {
-                    if sockaddr.port() != 0 {
-                        if !is_free_listening_port_for(
-                            control,
-                            sockaddr.port(),
-                            ClientMessageIp::Ipv4(format!("{}", ipv4)),
-                        ) {
-                            return Err(io::Error::new(io::ErrorKind::Other, "port not free"));
-                        }
-                    } else {
-                        let local_port = find_free_connecting_or_listening_port_for(
-                            false,
-                            control,
-                            ClientMessageIp::Ipv4(format!("{}", ipv4)),
-                        );
-                        sockaddr.set_port(local_port);
-                    }
+            let mut lo_result = Err(io::Error::new(io::ErrorKind::Other, "uninit"));
+            let mut usnet_result = Err(io::Error::new(io::ErrorKind::Other, "uninit"));
+            let find_random = sockaddr.port() == 0;
+            while lo_result.is_err() && (usnet_result.is_err() || sockaddr.ip().is_loopback()) {
+                if find_random {
+                    let local_port: u16 = 1u16 + thread_rng().gen_range(1024, std::u16::MAX);
+                    sockaddr.set_port(local_port);
                 }
-                _ => {
-                    while sockaddr.port() == 0 {
-                        let local_port = rand::random::<u16>();
-                        sockaddr.set_port(local_port);
-                    }
+                let mut loaddr = sockaddr.clone();
+                if loaddr.ip().is_unspecified() {
+                    loaddr.set_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
                 }
-            };
-
-            let mut loaddr = sockaddr.clone();
-            if loaddr.ip().is_unspecified() {
-                loaddr.set_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+                lo_result = SystemTcpListener::bind(loaddr);
+                if lo_result.is_ok() && !sockaddr.ip().is_loopback() {
+                    usnet_result = stcpnet.iface.add_port_match(
+                        ipa,
+                        Some(sockaddr.port()),
+                        None,
+                        None,
+                        IpProtocol::Tcp,
+                    );
+                }
+                if !find_random {
+                    break;
+                }
             }
-            lolisten = SystemTcpListener::bind(loaddr)?;
+
+            lolisten = lo_result?;
             if sockaddr.ip().is_loopback() {
                 return Ok(StcpListenerRef {
                     l: Arc::new(Mutex::new(StcpListener {
@@ -312,6 +307,7 @@ impl StcpNetRef {
                     })),
                 });
             }
+            let _ = usnet_result?;
             lolisten.set_nonblocking(true)?;
             stcpnet.fds_add.push(lolisten.as_raw_fd());
 
@@ -321,9 +317,6 @@ impl StcpNetRef {
                 socket.listen(sockaddr.port()).unwrap();
                 listen_handles.push(tcp_handle);
             }
-            stcpnet
-                .iface
-                .add_port_match(ipa, sockaddr.port(), IpProtocol::Tcp)?;
         }
         Ok(StcpListenerRef {
             l: Arc::new(Mutex::new(StcpListener {
@@ -350,21 +343,32 @@ impl StcpNetRef {
                 return SystemTcpStream::connect(addr).map(|s| TcpStream::System(s));
             }
 
-            let mut local_port = 0;
-            while local_port == 0 {
-                local_port = rand::random::<u16>();
-            }
-
-            let ipv4 = stcpnet.iface.ips()[0].address();
-            match stcpnet.iface.control() {
-                Some(control) => {
-                    local_port = find_free_connecting_or_listening_port_for(
-                        true,
-                        control,
-                        ClientMessageIp::Ipv4(format!("{}", ipv4)),
-                    );
+            let mut local_port: u16;
+            loop {
+                local_port = 1u16 + thread_rng().gen_range(1024, std::u16::MAX);
+                let (lower, upper) = stcpnet.kernel_local_port_range;
+                if local_port >= lower && local_port <= upper {
+                    continue;
                 }
-                _ => {}
+                let own_ip = match ipv4.into() {
+                    IpAddress::Ipv4(v) => IpAddr::V4(Ipv4Addr::from(v)),
+                    IpAddress::Ipv6(v) => IpAddr::V6(Ipv6Addr::from(v)),
+                    IpAddress::Unspecified => IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+                    IpAddress::__Nonexhaustive => panic!("not covered"),
+                };
+                if stcpnet
+                    .iface
+                    .add_port_match(
+                        own_ip,
+                        Some(local_port),
+                        Some(addr.ip()),
+                        Some(addr.port()),
+                        IpProtocol::Tcp,
+                    )
+                    .is_ok()
+                {
+                    break;
+                }
             }
 
             tcp_handle = stcpnet.create_socket();

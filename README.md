@@ -14,6 +14,8 @@ Accepting and answering parallel short TCP connections is not as fast as with th
 See the TODO section for lacking features that some programs may need.
 Unsafe Rust code is used for packet transfer with netmap, macvtap syscalls, and file descriptor handover. Read Chapter 3 of the thesis which reasons about the threat model and L2 handling as trusted code base.
 
+Netmap support is an optional build feature. It can be used for direct NIC access or for faster IPC channels to usnetd through netmap pipes instead of Unix domain sockets.
+
 ## Porting Rust code
 
 It is recommendable to introduce support for usnet_sockets through conditional compilation with a build feature flag.

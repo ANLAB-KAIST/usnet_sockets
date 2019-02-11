@@ -20,6 +20,7 @@ parking_lot = "0.6"
 
 [features]
 default = ["multi"]
+netmap = ["usnet_devices/netmap"]
 
 multi = []
 single = []

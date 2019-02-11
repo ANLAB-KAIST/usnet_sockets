@@ -16,7 +16,7 @@ pub fn get_default_interface() -> String {
     let sout1 = String::from_utf8(coutput.stdout).unwrap();
     let sout = sout1.split(' ').collect::<Vec<_>>();
     let origifname = sout[4].to_string();
-    origifname
+    origifname.replace("usnetd", "")
 }
 
 pub fn get_gateway(interface: &str) -> Option<String> {

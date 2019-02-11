@@ -9,7 +9,11 @@ use std::process;
 extern crate libusnetd;
 use self::libusnetd::{ClientMessage, ClientMessageIp, SOCKET_PATH};
 extern crate usnet_devices;
-use self::usnet_devices::{nmreq, Netmap, RawSocket, TapInterface, UnixDomainSocket};
+#[cfg(feature = "netmap")]
+use self::usnet_devices::{nmreq, Netmap};
+
+use self::usnet_devices::{RawSocket, TapInterface, UnixDomainSocket};
+
 use smoltcp::iface::{EthernetInterfaceBuilder, NeighborCache, Routes};
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, IpProtocol, Ipv4Address};
 
@@ -27,6 +31,7 @@ use std::io::prelude::*;
 use std::process::Command;
 use system::*;
 
+#[cfg(feature = "netmap")]
 use std::mem;
 
 use rand;
@@ -99,12 +104,14 @@ pub enum TapMac {
     Random,
 }
 
+#[cfg(feature = "netmap")]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum NetmapInterface {
     DiscoverFromRoute,
     Interface { netmap_name: String, parent: String },
 }
 
+#[cfg(feature = "netmap")]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum NetmapDevice {
     Interface {
@@ -116,6 +123,7 @@ pub enum NetmapDevice {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum UsnetType {
+    #[cfg(feature = "netmap")]
     NetmapPipe,
     UnixDomainSocket,
 }
@@ -135,6 +143,7 @@ pub enum StcpBackend {
     RawConfig,
     TapConfig(TapDevice),
     MacVtapConfig(MacVtapDevice),
+    #[cfg(feature = "netmap")]
     NetmapConfig(NetmapDevice),
     UsnetConfig(UsnetDevice),
 }
@@ -150,12 +159,13 @@ impl StcpBackend {
         serde_json::to_string(self).unwrap()
     }
 
-    // this function needs refactoring for core sharing
+    // this function needs refactoring for code sharing
     pub fn to_interface(
         self,
         waiting_poll: bool,
         reduce_mtu_by: Option<usize>,
     ) -> (RawFd, StcpBackendInterface) {
+        let _ = waiting_poll;
         let neighbor_cache = NeighborCache::new(BTreeMap::new());
         match self {
             StcpBackend::RawConfig => {
@@ -377,6 +387,7 @@ impl StcpBackend {
                     },
                 )
             }
+            #[cfg(feature = "netmap")]
             StcpBackend::NetmapConfig(NetmapDevice::Interface {
                 interface,
                 mac,
@@ -549,6 +560,7 @@ impl StcpBackend {
                     },
                 )
             }
+            #[cfg(feature = "netmap")]
             StcpBackend::UsnetConfig(UsnetDevice::Interface {
                 interface,
                 ipc: UsnetType::NetmapPipe,

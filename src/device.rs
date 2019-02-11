@@ -4,7 +4,10 @@ use std::fmt;
 use std::fs::remove_file;
 
 extern crate usnet_devices;
-use self::usnet_devices::{Netmap, RawSocket, TapInterface, UnixDomainSocket};
+#[cfg(feature = "netmap")]
+use self::usnet_devices::Netmap;
+use self::usnet_devices::{RawSocket, TapInterface, UnixDomainSocket};
+
 use smoltcp;
 use smoltcp::iface::EthernetInterface;
 use smoltcp::socket::SocketSet;
@@ -29,6 +32,7 @@ pub enum StcpBackendInterface {
         interface: EthernetInterface<'static, 'static, 'static, TapInterface>,
         destroy: Option<String>,
     },
+    #[cfg(feature = "netmap")]
     Netmap {
         interface: EthernetInterface<'static, 'static, 'static, Netmap>,
     },
@@ -36,6 +40,7 @@ pub enum StcpBackendInterface {
         interface: EthernetInterface<'static, 'static, 'static, UnixDomainSocket>,
         control: UnixDatagram,
     },
+    #[cfg(feature = "netmap")]
     UsnetNetmap {
         interface: EthernetInterface<'static, 'static, 'static, Netmap>,
         control: UnixDatagram,
@@ -54,7 +59,9 @@ impl fmt::Display for StcpBackendInterface {
                 interface: _,
                 destroy: _,
             } => "direct tap",
+            #[cfg(feature = "netmap")]
             StcpBackendInterface::Netmap { interface: _ } => "direct netmap",
+            #[cfg(feature = "netmap")]
             StcpBackendInterface::UsnetNetmap {
                 interface: _,
                 control: _,
@@ -126,6 +133,7 @@ impl StcpBackendInterface {
     }
     pub fn control(&mut self) -> Option<&mut UnixDatagram> {
         match self {
+            #[cfg(feature = "netmap")]
             StcpBackendInterface::UsnetNetmap {
                 interface: _,
                 ref mut control,
@@ -148,9 +156,11 @@ impl StcpBackendInterface {
                 interface: ref iface,
                 destroy: _,
             } => iface.ethernet_addr(),
+            #[cfg(feature = "netmap")]
             StcpBackendInterface::Netmap {
                 interface: ref iface,
             } => iface.ethernet_addr(),
+            #[cfg(feature = "netmap")]
             StcpBackendInterface::UsnetNetmap {
                 interface: ref iface,
                 control: _,
@@ -172,9 +182,11 @@ impl StcpBackendInterface {
                 interface: ref iface,
                 destroy: _,
             } => iface.ip_addrs(),
+            #[cfg(feature = "netmap")]
             StcpBackendInterface::Netmap {
                 interface: ref iface,
             } => iface.ip_addrs(),
+            #[cfg(feature = "netmap")]
             StcpBackendInterface::UsnetNetmap {
                 interface: ref iface,
                 control: _,
@@ -196,9 +208,11 @@ impl StcpBackendInterface {
                 interface: ref mut iface,
                 destroy: _,
             } => iface.poll(sockets, timestamp),
+            #[cfg(feature = "netmap")]
             StcpBackendInterface::Netmap {
                 interface: ref mut iface,
             } => iface.poll(sockets, timestamp),
+            #[cfg(feature = "netmap")]
             StcpBackendInterface::UsnetNetmap {
                 interface: ref mut iface,
                 control: _,
@@ -220,9 +234,11 @@ impl StcpBackendInterface {
                 interface: ref iface,
                 destroy: _,
             } => iface.poll_delay(sockets, timestamp),
+            #[cfg(feature = "netmap")]
             StcpBackendInterface::Netmap {
                 interface: ref iface,
             } => iface.poll_delay(sockets, timestamp),
+            #[cfg(feature = "netmap")]
             StcpBackendInterface::UsnetNetmap {
                 interface: ref iface,
                 control: _,
@@ -256,34 +272,37 @@ impl Drop for StcpBackendInterface {
             }
             StcpBackendInterface::UsnetUds {
                 interface: _,
-                ref control,
-            }
-            | StcpBackendInterface::UsnetNetmap {
+                ref mut control,
+            } => delete(control),
+            #[cfg(feature = "netmap")]
+            StcpBackendInterface::UsnetNetmap {
                 interface: _,
-                ref control,
-            } => {
-                // unregister from usnetd
-                let payl = serde_json::to_string(&ClientMessage::DeleteClient).unwrap();
-                let sent_bytes = control
-                    .send_to(payl.as_bytes(), SOCKET_PATH)
-                    .expect("cannot send to service unix domain socket");
-                assert_eq!(sent_bytes, payl.len());
-                if let Ok(sockaddr) = control.local_addr() {
-                    if let Some(path) = sockaddr.as_pathname() {
-                        match remove_file(path) {
-                            Err(err) => {
-                                error!("drop: could not remove {}: {}", path.display(), err);
-                            }
-                            _ => {}
-                        }
-                    } else {
-                        error!("drop: no pathname");
-                    }
-                } else {
-                    error!("drop: no local addr");
-                }
-            }
+                ref mut control,
+            } => delete(control),
             _ => {}
         }
+    }
+}
+
+fn delete(control: &mut UnixDatagram) {
+    // unregister from usnetd
+    let payl = serde_json::to_string(&ClientMessage::DeleteClient).unwrap();
+    let sent_bytes = control
+        .send_to(payl.as_bytes(), SOCKET_PATH)
+        .expect("cannot send to service unix domain socket");
+    assert_eq!(sent_bytes, payl.len());
+    if let Ok(sockaddr) = control.local_addr() {
+        if let Some(path) = sockaddr.as_pathname() {
+            match remove_file(path) {
+                Err(err) => {
+                    error!("drop: could not remove {}: {}", path.display(), err);
+                }
+                _ => {}
+            }
+        } else {
+            error!("drop: no pathname");
+        }
+    } else {
+        error!("drop: no local addr");
     }
 }

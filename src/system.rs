@@ -28,8 +28,16 @@ pub fn get_gateway(interface: &str) -> Option<String> {
     let sout = sout1.split(' ').collect::<Vec<_>>();
     let gateway = sout[2];
     if gateway == interface {
-        debug!("extracted no gateway for {}", interface);
-        None
+        if interface.ends_with("usnetd") {
+            debug!("extracted no gateway for {}", interface);
+            None
+        } else {
+            debug!(
+                "extracted no gateway for {}, trying {}usnetd",
+                interface, interface
+            );
+            get_gateway(&(interface.to_string() + "usnetd"))
+        }
     } else {
         debug!("extracted gateway {} for {}", gateway, interface);
         Some(gateway.to_string())

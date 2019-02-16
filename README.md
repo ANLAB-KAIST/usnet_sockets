@@ -118,4 +118,4 @@ The socket types will transparently listen on and connect to the loopback interf
 * Support epoll for porting mio/Tokio and provide a custom RawFd type (conversion to and from RawFds however should still not be possible)
 * Better multithreading usage: Fine-grained locking for smoltcp, optimized unblocking of application threads, multiple background threads
 * Deregister port matches on drop/prune
-* Implement all the functions that TcpStream and TcpListener have: read/write timeout, peek, TTL, nonblocking
+* Implement all the functions that TcpStream has: read/write timeout, peek, TTL, nonblocking

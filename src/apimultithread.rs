@@ -317,6 +317,8 @@ impl StcpNetRef {
                             port: sockaddr.port(),
                             lo: lolisten,
                             listen_handles: None,
+                            ttl: None,
+                            nonblocking: false,
                         })),
                     });
                 }
@@ -343,6 +345,8 @@ impl StcpNetRef {
                     port: sockaddr.port(),
                     listen_handles: Some(listen_handles),
                     lo: lolisten,
+                    ttl: None,
+                    nonblocking: false,
                 })),
             });
         }
@@ -438,6 +442,7 @@ impl StcpNetRef {
                 return Ok(TcpStream::Stcp(StcpStream {
                     stcpnet: (*self).clone(),
                     sockethandle: tcp_handle,
+                    nonblocking: false,
                 }));
             }
         }
@@ -450,6 +455,8 @@ pub struct StcpListener {
     listen_handles: Option<Vec<SocketHandle>>,
     lo: SystemTcpListener,
     port: u16,
+    ttl: Option<u8>,
+    nonblocking: bool,
 }
 
 impl Drop for StcpListener {
@@ -470,6 +477,7 @@ impl Drop for StcpListener {
 pub struct StcpStream {
     stcpnet: StcpNetRef,
     sockethandle: SocketHandle,
+    nonblocking: bool,
 }
 
 pub struct StcpListenerIt {
@@ -509,10 +517,47 @@ impl StcpListenerRef {
             }
         }
     }
+    pub fn ttl(&self) -> io::Result<u32> {
+        let listener = self.l.lock();
+        Ok(listener.ttl.unwrap_or(64) as u32)
+    }
+    pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
+        let mut listener = self.l.lock();
+        listener.ttl = Some(ttl as u8);
+        if let Some(handles) = listener.listen_handles.as_ref() {
+            let &(ref stcpnetref, ref _cond) = &*listener.stcpnet.r;
+            let mut stcpnet = stcpnetref.lock();
+            for handle in handles.iter() {
+                let mut socket = stcpnet.sockets.get::<TcpSocket>(*handle);
+                socket.set_hop_limit(listener.ttl);
+            }
+        }
+        listener.lo.set_ttl(ttl)
+    }
+    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        let listener = self.l.lock();
+        listener.lo.take_error()
+    }
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        let mut listener = self.l.lock();
+        listener.nonblocking = nonblocking;
+        if listener.listen_handles.is_none() {
+            // only loopback, otherwise always nonblocking
+            listener.lo.set_nonblocking(nonblocking)?;
+        }
+        Ok(())
+    }
+    pub fn try_clone(&self) -> io::Result<StcpListenerRef> {
+        Ok(StcpListenerRef { l: self.l.clone() })
+    }
     pub fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
         let mut listener = self.l.lock();
         if listener.listen_handles.is_none() {
-            return listener.lo.accept().map(|(s, a)| (TcpStream::System(s), a));
+            return listener.lo.accept().map(|(s, a)| {
+                s.set_nonblocking(listener.nonblocking)
+                    .expect("couldn't set nonblocking option");
+                (TcpStream::System(s), a)
+            });
         }
         loop {
             let mut r = None;
@@ -520,11 +565,13 @@ impl StcpListenerRef {
                 let &(ref stcpnetref, ref cond) = &*listener.stcpnet.r;
                 let mut stcpnet = stcpnetref.lock();
 
-                cond.wait(&mut stcpnet);
+                if !listener.nonblocking {
+                    cond.wait(&mut stcpnet);
+                }
 
                 let sys_res = listener.lo.accept();
                 if let Ok((s, a)) = sys_res {
-                    s.set_nonblocking(false)
+                    s.set_nonblocking(listener.nonblocking)
                         .expect("couldn't set nonblocking option");
                     return Ok((TcpStream::System(s), a));
                 }
@@ -540,6 +587,7 @@ impl StcpListenerRef {
                                 TcpStream::Stcp(StcpStream {
                                     stcpnet: listener.stcpnet.clone(),
                                     sockethandle: *handle,
+                                    nonblocking: listener.nonblocking,
                                 }),
                                 sadd,
                             )),
@@ -557,12 +605,19 @@ impl StcpListenerRef {
                         let mut stcpnet = stcpnetref.lock();
                         tcp_handle = stcpnet.create_socket();
                         let mut socket = stcpnet.sockets.get::<TcpSocket>(tcp_handle);
+                        socket.set_hop_limit(listener.ttl);
                         socket.listen(listener.port).unwrap();
                     }
                     listener.listen_handles.as_mut().unwrap().push(tcp_handle);
                     return r;
                 }
                 _ => {}
+            }
+            if listener.nonblocking {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "no active connection found",
+                ));
             }
         }
     }
@@ -837,6 +892,7 @@ impl StcpStream {
         Ok(StcpStream {
             stcpnet: self.stcpnet.clone(),
             sockethandle: self.sockethandle.clone(),
+            nonblocking: self.nonblocking,
         })
     }
 }

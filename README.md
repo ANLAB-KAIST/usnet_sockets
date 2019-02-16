@@ -113,7 +113,7 @@ The socket types will transparently listen on and connect to the loopback interf
 * IPv6
 * DNS (currently uses the standard library to resolve names)
 * See smoltcp list of unimplemented features (congestion control, IP fragmentation, path MTU discovery, probing zero windows, DHCP, selective/delayed ACKs, avoiding silly window syndrome, Nagle's algorithm, …)
-* Binding and connecting to multiple IP addresses
+* Multiple IP addresses per NIC
 * Multiple NICs and routing
 * Support epoll for porting mio/Tokio and provide a custom RawFd type (conversion to and from RawFds however should still not be possible)
 * Better multithreading usage: Fine-grained locking for smoltcp, optimized unblocking of application threads, multiple background threads

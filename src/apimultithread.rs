@@ -259,73 +259,94 @@ impl StcpNet {
 
 impl StcpNetRef {
     fn bind<A: ToSocketAddrs>(&self, addr: A) -> io::Result<StcpListenerRef> {
-        let sockaddrs: Vec<SocketAddr> = addr.to_socket_addrs().unwrap().collect();
-        let mut sockaddr = sockaddrs[0];
-        let ipa = sockaddr.ip();
-
-        let mut listen_handles = vec![];
-        let lolisten;
-        {
-            let &(ref stcpnetref, ref _cond) = &*self.r;
-            let mut stcpnet = stcpnetref.lock();
-
-            let mut lo_result = Err(io::Error::new(io::ErrorKind::Other, "uninit"));
-            let mut usnet_result = Err(io::Error::new(io::ErrorKind::Other, "uninit"));
-            let find_random = sockaddr.port() == 0;
-            while lo_result.is_err() && (usnet_result.is_err() || sockaddr.ip().is_loopback()) {
-                if find_random {
-                    let local_port: u16 = 1u16 + thread_rng().gen_range(1024, std::u16::MAX);
-                    sockaddr.set_port(local_port);
-                }
-                let mut loaddr = sockaddr.clone();
-                if loaddr.ip().is_unspecified() {
-                    loaddr.set_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
-                }
-                lo_result = SystemTcpListener::bind(loaddr);
-                if lo_result.is_ok() && !sockaddr.ip().is_loopback() {
-                    usnet_result = stcpnet.iface.add_port_match(
-                        ipa,
-                        Some(sockaddr.port()),
-                        None,
-                        None,
-                        IpProtocol::Tcp,
-                    );
-                }
-                if !find_random {
-                    break;
-                }
+        let mut r = Err(io::Error::new(
+            io::ErrorKind::Other,
+            "to_socket_addrs is empty",
+        ));
+        for mut sockaddr in addr.to_socket_addrs()? {
+            let ipa = sockaddr.ip();
+            if !ipa.is_loopback() && ipa.is_ipv6() {
+                r = Err(io::Error::new(io::ErrorKind::Other, "ipv6 bind"));
+                continue;
             }
 
-            lolisten = lo_result?;
-            if sockaddr.ip().is_loopback() {
-                return Ok(StcpListenerRef {
-                    l: Arc::new(Mutex::new(StcpListener {
-                        stcpnet: (*self).clone(),
-                        port: sockaddr.port(),
-                        lo: lolisten,
-                        listen_handles: None,
-                    })),
-                });
-            }
-            let _ = usnet_result?;
-            lolisten.set_nonblocking(true)?;
-            stcpnet.fds_add.push(lolisten.as_raw_fd());
+            let mut listen_handles = vec![];
+            let lolisten;
+            {
+                let &(ref stcpnetref, ref _cond) = &*self.r;
+                let mut stcpnet = stcpnetref.lock();
 
-            for _ in 0..stcpnet.socket_backlog {
-                let tcp_handle = stcpnet.create_socket();
-                let mut socket = stcpnet.sockets.get::<TcpSocket>(tcp_handle);
-                socket.listen(sockaddr.port()).unwrap();
-                listen_handles.push(tcp_handle);
+                let mut lo_result = Err(io::Error::new(io::ErrorKind::Other, "uninit"));
+                let mut usnet_result = Err(io::Error::new(io::ErrorKind::Other, "uninit"));
+                let find_random = sockaddr.port() == 0;
+                while lo_result.is_err() && (usnet_result.is_err() || sockaddr.ip().is_loopback()) {
+                    if find_random {
+                        let local_port: u16 = 1u16 + thread_rng().gen_range(1024, std::u16::MAX);
+                        sockaddr.set_port(local_port);
+                    }
+                    let mut loaddr = sockaddr.clone();
+                    if loaddr.ip().is_unspecified() {
+                        loaddr.set_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+                    }
+                    lo_result = SystemTcpListener::bind(loaddr);
+                    if lo_result.is_ok() && !sockaddr.ip().is_loopback() {
+                        usnet_result = stcpnet.iface.add_port_match(
+                            ipa,
+                            Some(sockaddr.port()),
+                            None,
+                            None,
+                            IpProtocol::Tcp,
+                        );
+                    }
+                    if !find_random {
+                        break;
+                    }
+                }
+
+                match lo_result {
+                    Ok(l) => lolisten = l,
+                    Err(e) => {
+                        r = Err(e);
+                        continue;
+                    }
+                }
+                if sockaddr.ip().is_loopback() {
+                    return Ok(StcpListenerRef {
+                        l: Arc::new(Mutex::new(StcpListener {
+                            stcpnet: (*self).clone(),
+                            port: sockaddr.port(),
+                            lo: lolisten,
+                            listen_handles: None,
+                        })),
+                    });
+                }
+                match usnet_result {
+                    Ok(_) => {}
+                    Err(e) => {
+                        r = Err(e);
+                        continue;
+                    }
+                }
+                lolisten.set_nonblocking(true)?;
+                stcpnet.fds_add.push(lolisten.as_raw_fd());
+
+                for _ in 0..stcpnet.socket_backlog {
+                    let tcp_handle = stcpnet.create_socket();
+                    let mut socket = stcpnet.sockets.get::<TcpSocket>(tcp_handle);
+                    socket.listen(sockaddr.port()).unwrap();
+                    listen_handles.push(tcp_handle);
+                }
             }
+            return Ok(StcpListenerRef {
+                l: Arc::new(Mutex::new(StcpListener {
+                    stcpnet: (*self).clone(),
+                    port: sockaddr.port(),
+                    listen_handles: Some(listen_handles),
+                    lo: lolisten,
+                })),
+            });
         }
-        Ok(StcpListenerRef {
-            l: Arc::new(Mutex::new(StcpListener {
-                stcpnet: (*self).clone(),
-                port: sockaddr.port(),
-                listen_handles: Some(listen_handles),
-                lo: lolisten,
-            })),
-        })
+        r
     }
     fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<TcpStream> {
         let mut r = Err(io::Error::new(

@@ -328,76 +328,99 @@ impl StcpNetRef {
         })
     }
     fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<TcpStream> {
-        let addr = addr.to_socket_addrs().unwrap().next().unwrap();
-
-        let tcp_handle;
-        {
-            let &(ref stcpnetref, ref cond) = &*self.r;
-            let mut stcpnet = stcpnetref.lock();
-
-            let ipv4 = stcpnet.iface.ips()[0].address();
-            if addr.ip().is_loopback()
-                || IpAddress::from(addr.ip()) == ipv4
-                || addr.ip().is_unspecified()
+        let mut r = Err(io::Error::new(
+            io::ErrorKind::Other,
+            "to_socket_addrs is empty",
+        ));
+        for addr in addr.to_socket_addrs()? {
+            let mut error = false;
+            let tcp_handle;
             {
-                return SystemTcpStream::connect(addr).map(|s| TcpStream::System(s));
-            }
+                let &(ref stcpnetref, ref cond) = &*self.r;
+                let mut stcpnet = stcpnetref.lock();
 
-            let mut local_port: u16;
-            loop {
-                local_port = 1u16 + thread_rng().gen_range(1024, std::u16::MAX);
-                let (lower, upper) = stcpnet.kernel_local_port_range;
-                if local_port >= lower && local_port <= upper {
+                let ipv4 = stcpnet.iface.ips()[0].address();
+                if addr.ip().is_loopback()
+                    || IpAddress::from(addr.ip()) == ipv4
+                    || addr.ip().is_unspecified()
+                {
+                    r = SystemTcpStream::connect(addr).map(|s| TcpStream::System(s));
+                    if r.is_ok() {
+                        return r;
+                    } else {
+                        continue;
+                    }
+                }
+                if addr.is_ipv6() {
+                    r = Err(io::Error::new(io::ErrorKind::Other, "ipv6 address"));
                     continue;
                 }
-                let own_ip = match ipv4.into() {
-                    IpAddress::Ipv4(v) => IpAddr::V4(Ipv4Addr::from(v)),
-                    IpAddress::Ipv6(v) => IpAddr::V6(Ipv6Addr::from(v)),
-                    IpAddress::Unspecified => IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
-                    IpAddress::__Nonexhaustive => panic!("not covered"),
-                };
-                if stcpnet
-                    .iface
-                    .add_port_match(
-                        own_ip,
-                        Some(local_port),
-                        Some(addr.ip()),
-                        Some(addr.port()),
-                        IpProtocol::Tcp,
-                    )
-                    .is_ok()
+
+                let mut local_port: u16;
+                loop {
+                    local_port = 1u16 + thread_rng().gen_range(1024, std::u16::MAX);
+                    let (lower, upper) = stcpnet.kernel_local_port_range;
+                    if local_port >= lower && local_port <= upper {
+                        continue;
+                    }
+                    let own_ip = match ipv4.into() {
+                        IpAddress::Ipv4(v) => IpAddr::V4(Ipv4Addr::from(v)),
+                        IpAddress::Ipv6(v) => IpAddr::V6(Ipv6Addr::from(v)),
+                        IpAddress::Unspecified => IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+                        IpAddress::__Nonexhaustive => panic!("not covered"),
+                    };
+                    if stcpnet
+                        .iface
+                        .add_port_match(
+                            own_ip,
+                            Some(local_port),
+                            Some(addr.ip()),
+                            Some(addr.port()),
+                            IpProtocol::Tcp,
+                        )
+                        .is_ok()
+                    {
+                        break;
+                    }
+                }
+
+                tcp_handle = stcpnet.create_socket();
                 {
-                    break;
+                    let mut socket = stcpnet.sockets.get::<TcpSocket>(tcp_handle);
+                    socket.connect(addr, local_port).unwrap();
+                }
+
+                if stcpnet.bg_skip_one_wait == Skip::Wait {
+                    let _ = stcpnet.notify_poll.send(b"$").unwrap();
+                } else {
+                    stcpnet.bg_skip_one_wait = Skip::Skip;
+                }
+
+                while !{
+                    let socket = stcpnet.sockets.get::<TcpSocket>(tcp_handle);
+                    if !socket.is_active() {
+                        error = true;
+                        true // break
+                    } else {
+                        socket.may_recv() && socket.may_send()
+                    }
+                } {
+                    cond.wait(&mut stcpnet);
                 }
             }
-
-            tcp_handle = stcpnet.create_socket();
-            {
-                let mut socket = stcpnet.sockets.get::<TcpSocket>(tcp_handle);
-                socket.connect(addr, local_port).unwrap();
-            }
-
-            if stcpnet.bg_skip_one_wait == Skip::Wait {
-                let _ = stcpnet.notify_poll.send(b"$").unwrap();
+            if error {
+                r = Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "connection not successful",
+                ));
             } else {
-                stcpnet.bg_skip_one_wait = Skip::Skip;
-            }
-
-            while !{
-                let socket = stcpnet.sockets.get::<TcpSocket>(tcp_handle);
-                if !socket.is_active() {
-                    return Err(io::Error::new(io::ErrorKind::Other, "connection timed out"));
-                }
-                socket.may_recv() && socket.may_send()
-            } {
-                cond.wait(&mut stcpnet);
+                return Ok(TcpStream::Stcp(StcpStream {
+                    stcpnet: (*self).clone(),
+                    sockethandle: tcp_handle,
+                }));
             }
         }
-        Ok(StcpStream {
-            stcpnet: (*self).clone(),
-            sockethandle: tcp_handle,
-        })
-        .map(|s| TcpStream::Stcp(s))
+        r
     }
 }
 

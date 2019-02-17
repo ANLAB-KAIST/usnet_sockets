@@ -13,6 +13,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
+use std::time::Duration;
+use std::time::Instant as StdInstant;
 
 use smoltcp;
 use smoltcp::socket::SocketSet;
@@ -352,7 +354,17 @@ impl StcpNetRef {
         }
         r
     }
+    fn connect_timeout(&self, addr: &SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
+        self.connect_timeout_opt(addr, Some(timeout))
+    }
     fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<TcpStream> {
+        self.connect_timeout_opt(addr, None)
+    }
+    fn connect_timeout_opt<A: ToSocketAddrs>(
+        &self,
+        addr: A,
+        timeout: Option<Duration>,
+    ) -> io::Result<TcpStream> {
         let mut r = Err(io::Error::new(
             io::ErrorKind::Other,
             "to_socket_addrs is empty",
@@ -369,7 +381,11 @@ impl StcpNetRef {
                     || IpAddress::from(addr.ip()) == ipv4
                     || addr.ip().is_unspecified()
                 {
-                    r = SystemTcpStream::connect(addr).map(|s| TcpStream::System(s));
+                    r = match timeout {
+                        Some(timeout) => SystemTcpStream::connect_timeout(&addr, timeout),
+                        None => SystemTcpStream::connect(addr),
+                    }
+                    .map(|s| TcpStream::System(s));
                     if r.is_ok() {
                         return r;
                     } else {
@@ -421,6 +437,7 @@ impl StcpNetRef {
                     stcpnet.bg_skip_one_wait = Skip::Skip;
                 }
 
+                let start = StdInstant::now();
                 while !{
                     let socket = stcpnet.sockets.get::<TcpSocket>(tcp_handle);
                     if !socket.is_active() {
@@ -430,7 +447,23 @@ impl StcpNetRef {
                         socket.may_recv() && socket.may_send()
                     }
                 } {
-                    cond.wait(&mut stcpnet);
+                    match timeout {
+                        Some(timeout) => {
+                            if cond.wait_until(&mut stcpnet, start + timeout).timed_out() {
+                                error = true;
+                                let mut socket = stcpnet.sockets.get::<TcpSocket>(tcp_handle);
+                                socket.abort();
+                                break;
+                            }
+                        }
+                        None => {
+                            cond.wait(&mut stcpnet);
+                        }
+                    }
+                }
+                if error {
+                    stcpnet.sockets.release(tcp_handle);
+                    stcpnet.sockets.prune();
                 }
             }
             if error {
@@ -443,6 +476,8 @@ impl StcpNetRef {
                     stcpnet: (*self).clone(),
                     sockethandle: tcp_handle,
                     nonblocking: false,
+                    read_timeout: None,
+                    write_timeout: None,
                 }));
             }
         }
@@ -478,6 +513,8 @@ pub struct StcpStream {
     stcpnet: StcpNetRef,
     sockethandle: SocketHandle,
     nonblocking: bool,
+    read_timeout: Option<Duration>,
+    write_timeout: Option<Duration>,
 }
 
 pub struct StcpListenerIt {
@@ -588,6 +625,8 @@ impl StcpListenerRef {
                                     stcpnet: listener.stcpnet.clone(),
                                     sockethandle: *handle,
                                     nonblocking: listener.nonblocking,
+                                    read_timeout: None,
+                                    write_timeout: None,
                                 }),
                                 sadd,
                             )),
@@ -657,6 +696,75 @@ impl TcpStream {
     pub fn connect<A: ToSocketAddrs>(addr: A) -> io::Result<TcpStream> {
         STCP_GLOBAL.connect(addr)
     }
+    pub fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
+        STCP_GLOBAL.connect_timeout(addr, timeout)
+    }
+    pub fn set_read_timeout(&mut self, dur: Option<Duration>) -> io::Result<()> {
+        match self {
+            TcpStream::Stcp(slf) => slf.set_read_timeout(dur),
+            TcpStream::System(slf) => slf.set_read_timeout(dur),
+        }
+    }
+    pub fn read_timeout(&self) -> io::Result<Option<Duration>> {
+        match self {
+            TcpStream::Stcp(slf) => slf.read_timeout(),
+            TcpStream::System(slf) => slf.read_timeout(),
+        }
+    }
+    pub fn set_write_timeout(&mut self, dur: Option<Duration>) -> io::Result<()> {
+        match self {
+            TcpStream::Stcp(slf) => slf.set_write_timeout(dur),
+            TcpStream::System(slf) => slf.set_write_timeout(dur),
+        }
+    }
+    pub fn write_timeout(&self) -> io::Result<Option<Duration>> {
+        match self {
+            TcpStream::Stcp(slf) => slf.write_timeout(),
+            TcpStream::System(slf) => slf.write_timeout(),
+        }
+    }
+    pub fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            TcpStream::Stcp(slf) => slf.peek(buf),
+            TcpStream::System(slf) => slf.peek(buf),
+        }
+    }
+    pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
+        match self {
+            TcpStream::Stcp(slf) => slf.set_nodelay(nodelay),
+            TcpStream::System(slf) => slf.set_nodelay(nodelay),
+        }
+    }
+    pub fn nodelay(&self) -> io::Result<bool> {
+        match self {
+            TcpStream::Stcp(slf) => slf.nodelay(),
+            TcpStream::System(slf) => slf.nodelay(),
+        }
+    }
+    pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
+        match self {
+            TcpStream::Stcp(slf) => slf.set_ttl(ttl),
+            TcpStream::System(slf) => slf.set_ttl(ttl),
+        }
+    }
+    pub fn ttl(&self) -> io::Result<u32> {
+        match self {
+            TcpStream::Stcp(slf) => slf.ttl(),
+            TcpStream::System(slf) => slf.ttl(),
+        }
+    }
+    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        match self {
+            TcpStream::Stcp(_) => Ok(None),
+            TcpStream::System(slf) => slf.take_error(),
+        }
+    }
+    pub fn set_nonblocking(&mut self, nonblocking: bool) -> io::Result<()> {
+        match self {
+            TcpStream::Stcp(slf) => slf.set_nonblocking(nonblocking),
+            TcpStream::System(slf) => slf.set_nonblocking(nonblocking),
+        }
+    }
     pub fn try_clone(&self) -> io::Result<TcpStream> {
         match self {
             TcpStream::Stcp(slf) => Ok(TcpStream::Stcp(slf.try_clone()?)),
@@ -689,6 +797,7 @@ impl TcpStream {
     {
         match self {
             TcpStream::Stcp(slf) => {
+                let start = StdInstant::now();
                 let &(ref stcpnetref, ref cond) = &*slf.stcpnet.r;
                 let mut stcpnet = stcpnetref.lock();
 
@@ -699,7 +808,19 @@ impl TcpStream {
                     }
                     !socket.can_send()
                 } {
-                    cond.wait(&mut stcpnet);
+                    if slf.nonblocking {
+                        return Err(smoltcp::Error::Exhausted);
+                    }
+                    match slf.write_timeout {
+                        Some(timeout) => {
+                            if cond.wait_until(&mut stcpnet, start + timeout).timed_out() {
+                                return Err(smoltcp::Error::Exhausted);
+                            }
+                        }
+                        None => {
+                            cond.wait(&mut stcpnet);
+                        }
+                    }
                 }
                 let r;
                 {
@@ -729,6 +850,7 @@ impl TcpStream {
     {
         match self {
             TcpStream::Stcp(slf) => {
+                let start = StdInstant::now();
                 let &(ref stcpnetref, ref cond) = &*slf.stcpnet.r;
                 let mut stcpnet = stcpnetref.lock();
                 while {
@@ -739,7 +861,19 @@ impl TcpStream {
                     }
                     !socket.can_recv()
                 } {
-                    cond.wait(&mut stcpnet);
+                    if slf.nonblocking {
+                        return Err(smoltcp::Error::Exhausted);
+                    }
+                    match slf.read_timeout {
+                        Some(timeout) => {
+                            if cond.wait_until(&mut stcpnet, start + timeout).timed_out() {
+                                return Err(smoltcp::Error::Exhausted);
+                            }
+                        }
+                        None => {
+                            cond.wait(&mut stcpnet);
+                        }
+                    }
                 }
                 let r;
                 {
@@ -783,7 +917,8 @@ impl Drop for StcpStream {
 }
 
 impl StcpStream {
-    pub fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    pub fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let start = StdInstant::now();
         let &(ref stcpnetref, ref cond) = &*self.stcpnet.r;
         let mut stcpnet = stcpnetref.lock();
         while {
@@ -793,7 +928,52 @@ impl StcpStream {
             }
             !socket.can_recv()
         } {
-            cond.wait(&mut stcpnet);
+            if self.nonblocking {
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, "peek not ready"));
+            }
+            match self.read_timeout {
+                Some(timeout) => {
+                    if cond.wait_until(&mut stcpnet, start + timeout).timed_out() {
+                        return Err(io::Error::new(io::ErrorKind::WouldBlock, "peek not ready"));
+                    }
+                }
+                None => {
+                    cond.wait(&mut stcpnet);
+                }
+            }
+        }
+
+        {
+            let mut socket = stcpnet.sockets.get::<TcpSocket>(self.sockethandle);
+            socket
+                .peek_slice(buf)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+        }
+    }
+    pub fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let start = StdInstant::now();
+        let &(ref stcpnetref, ref cond) = &*self.stcpnet.r;
+        let mut stcpnet = stcpnetref.lock();
+        while {
+            let socket = stcpnet.sockets.get::<TcpSocket>(self.sockethandle);
+            if !socket.may_recv() {
+                return Ok(0);
+            }
+            !socket.can_recv()
+        } {
+            if self.nonblocking {
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, "read not ready"));
+            }
+            match self.read_timeout {
+                Some(timeout) => {
+                    if cond.wait_until(&mut stcpnet, start + timeout).timed_out() {
+                        return Err(io::Error::new(io::ErrorKind::WouldBlock, "read not ready"));
+                    }
+                }
+                None => {
+                    cond.wait(&mut stcpnet);
+                }
+            }
         }
 
         let r;
@@ -813,6 +993,7 @@ impl StcpStream {
     }
 
     pub fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let start = StdInstant::now();
         let &(ref stcpnetref, ref cond) = &*self.stcpnet.r;
         let mut stcpnet = stcpnetref.lock();
         while {
@@ -825,7 +1006,19 @@ impl StcpStream {
             }
             !socket.can_send()
         } {
-            cond.wait(&mut stcpnet);
+            if self.nonblocking {
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, "write not ready"));
+            }
+            match self.write_timeout {
+                Some(timeout) => {
+                    if cond.wait_until(&mut stcpnet, start + timeout).timed_out() {
+                        return Err(io::Error::new(io::ErrorKind::WouldBlock, "write not ready"));
+                    }
+                }
+                None => {
+                    cond.wait(&mut stcpnet);
+                }
+            }
         }
 
         let r;
@@ -842,8 +1035,52 @@ impl StcpStream {
         }
         r
     }
-    pub fn flush(&mut self) -> io::Result<()> {
+    pub fn set_read_timeout(&mut self, dur: Option<Duration>) -> io::Result<()> {
+        self.read_timeout = dur;
         Ok(())
+    }
+    pub fn read_timeout(&self) -> io::Result<Option<Duration>> {
+        Ok(self.read_timeout)
+    }
+    pub fn set_write_timeout(&mut self, dur: Option<Duration>) -> io::Result<()> {
+        self.write_timeout = dur;
+        Ok(())
+    }
+    pub fn write_timeout(&self) -> io::Result<Option<Duration>> {
+        Ok(self.write_timeout)
+    }
+    pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
+        if nodelay {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "smoltcp does not have Nagle's algorithm",
+            ))
+        }
+    }
+    pub fn nodelay(&self) -> io::Result<bool> {
+        Ok(true)
+    }
+    pub fn flush(&mut self) -> io::Result<()> {
+        Ok(()) // because of nodelay
+    }
+    pub fn set_nonblocking(&mut self, nonblocking: bool) -> io::Result<()> {
+        self.nonblocking = nonblocking;
+        Ok(())
+    }
+    pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
+        let &(ref stcpnetref, ref _cond) = &*self.stcpnet.r;
+        let mut stcpnet = stcpnetref.lock();
+        let mut socket = stcpnet.sockets.get::<TcpSocket>(self.sockethandle);
+        socket.set_hop_limit(Some(ttl as u8));
+        Ok(())
+    }
+    pub fn ttl(&self) -> io::Result<u32> {
+        let &(ref stcpnetref, ref _cond) = &*self.stcpnet.r;
+        let mut stcpnet = stcpnetref.lock();
+        let socket = stcpnet.sockets.get::<TcpSocket>(self.sockethandle);
+        Ok(socket.hop_limit().unwrap_or(64) as u32)
     }
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         let &(ref stcpnetref, ref _cond) = &*self.stcpnet.r;
@@ -893,6 +1130,8 @@ impl StcpStream {
             stcpnet: self.stcpnet.clone(),
             sockethandle: self.sockethandle.clone(),
             nonblocking: self.nonblocking,
+            read_timeout: self.read_timeout,
+            write_timeout: self.write_timeout,
         })
     }
 }

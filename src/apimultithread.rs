@@ -5,24 +5,28 @@
 /// multithreading application because they are movable and have locking.
 /// Since there is a background thread which handles the socket timeouts and incoming
 /// packets, the application may do longer computations without calling socket operations.
-use parking_lot::{Condvar, Mutex};
+use parking_lot::{Condvar, Mutex, RwLock};
 use smoltcp::time::Instant;
 use std::io::{self, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Duration;
-use std::time::Instant as StdInstant;
+use std::time::{Duration, Instant as StdInstant};
 
 use smoltcp;
-use smoltcp::socket::SocketSet;
-use smoltcp::socket::{SocketHandle, TcpSocket, TcpSocketBuffer};
+use smoltcp::socket::{
+    SocketHandle, SocketSet, TcpSocket, TcpSocketBuffer, UdpPacketMetadata,
+    UdpSocket as SmoltcpUdpSocket, UdpSocketBuffer,
+};
 use smoltcp::wire::{IpAddress, IpEndpoint, IpProtocol};
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
-use std::net::{Shutdown, TcpListener as SystemTcpListener, TcpStream as SystemTcpStream};
+use std::net::{
+    IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener as SystemTcpListener,
+    TcpStream as SystemTcpStream, ToSocketAddrs, UdpSocket as SystemUdpSocket,
+};
 use std::os::unix::net::UnixDatagram;
 
 use nix::poll::{poll, EventFlags, PollFd};
@@ -475,11 +479,110 @@ impl StcpNetRef {
                 return Ok(TcpStream::Stcp(StcpStream {
                     stcpnet: (*self).clone(),
                     sockethandle: tcp_handle,
-                    nonblocking: false,
-                    read_timeout: None,
-                    write_timeout: None,
+                    nonblocking: Arc::new(AtomicBool::new(false)),
+                    read_timeout: Arc::new(RwLock::new(None)),
+                    write_timeout: Arc::new(RwLock::new(None)),
                 }));
             }
+        }
+        r
+    }
+    fn bind_udp<A: ToSocketAddrs>(&self, addr: A) -> io::Result<UdpSocket> {
+        let mut r = Err(io::Error::new(
+            io::ErrorKind::Other,
+            "to_socket_addrs is empty",
+        ));
+        for mut sockaddr in addr.to_socket_addrs()? {
+            let ipa = sockaddr.ip();
+            if !ipa.is_loopback() && ipa.is_ipv6() {
+                r = Err(io::Error::new(io::ErrorKind::Other, "ipv6 bind"));
+                continue;
+            }
+
+            let mut listen_handle;
+            let lolisten;
+            {
+                let &(ref stcpnetref, ref _cond) = &*self.r;
+                let mut stcpnet = stcpnetref.lock();
+
+                let mut lo_result = Err(io::Error::new(io::ErrorKind::Other, "uninit"));
+                let mut usnet_result = Err(io::Error::new(io::ErrorKind::Other, "uninit"));
+                let find_random = sockaddr.port() == 0;
+                while lo_result.is_err() && (usnet_result.is_err() || sockaddr.ip().is_loopback()) {
+                    if find_random {
+                        let local_port: u16 = 1u16 + thread_rng().gen_range(1024, std::u16::MAX);
+                        sockaddr.set_port(local_port);
+                    }
+                    let mut loaddr = sockaddr.clone();
+                    if loaddr.ip().is_unspecified() {
+                        loaddr.set_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+                    }
+                    lo_result = SystemUdpSocket::bind(loaddr);
+                    if lo_result.is_ok() && !sockaddr.ip().is_loopback() {
+                        usnet_result = stcpnet.iface.add_port_match(
+                            ipa,
+                            Some(sockaddr.port()),
+                            None,
+                            None,
+                            IpProtocol::Udp,
+                        );
+                    }
+                    if !find_random {
+                        break;
+                    }
+                }
+
+                match lo_result {
+                    Ok(l) => lolisten = l,
+                    Err(e) => {
+                        r = Err(e);
+                        continue;
+                    }
+                }
+                if sockaddr.ip().is_loopback() {
+                    return Ok(UdpSocket {
+                        stcpnet: (*self).clone(),
+                        socket_handle: None,
+                        lo: lolisten,
+                        connected: Arc::new(RwLock::new(None)),
+                        nonblocking: Arc::new(AtomicBool::new(false)),
+                        read_timeout: Arc::new(RwLock::new(None)),
+                        write_timeout: Arc::new(RwLock::new(None)),
+                    });
+                }
+                match usnet_result {
+                    Ok(_) => {}
+                    Err(e) => {
+                        r = Err(e);
+                        continue;
+                    }
+                }
+                lolisten.set_nonblocking(true)?;
+                stcpnet.fds_add.push(lolisten.as_raw_fd());
+
+                let udp_rx_buffer = UdpSocketBuffer::new(
+                    vec![UdpPacketMetadata::EMPTY; 1000],
+                    vec![0; stcpnet.socket_buffer_size],
+                );
+                let udp_tx_buffer = UdpSocketBuffer::new(
+                    vec![UdpPacketMetadata::EMPTY; 1000],
+                    vec![0; stcpnet.socket_buffer_size],
+                );
+                let udp_socket = SmoltcpUdpSocket::new(udp_rx_buffer, udp_tx_buffer);
+
+                listen_handle = stcpnet.sockets.add(udp_socket);
+                let mut socket = stcpnet.sockets.get::<SmoltcpUdpSocket>(listen_handle);
+                socket.bind(sockaddr.port()).unwrap();
+            }
+            return Ok(UdpSocket {
+                stcpnet: (*self).clone(),
+                socket_handle: Some(listen_handle),
+                lo: lolisten,
+                connected: Arc::new(RwLock::new(None)),
+                nonblocking: Arc::new(AtomicBool::new(false)),
+                read_timeout: Arc::new(RwLock::new(None)),
+                write_timeout: Arc::new(RwLock::new(None)),
+            });
         }
         r
     }
@@ -512,9 +615,9 @@ impl Drop for StcpListener {
 pub struct StcpStream {
     stcpnet: StcpNetRef,
     sockethandle: SocketHandle,
-    nonblocking: bool,
-    read_timeout: Option<Duration>,
-    write_timeout: Option<Duration>,
+    nonblocking: Arc<AtomicBool>,
+    read_timeout: Arc<RwLock<Option<Duration>>>,
+    write_timeout: Arc<RwLock<Option<Duration>>>,
 }
 
 pub struct StcpListenerIt {
@@ -624,9 +727,9 @@ impl StcpListenerRef {
                                 TcpStream::Stcp(StcpStream {
                                     stcpnet: listener.stcpnet.clone(),
                                     sockethandle: *handle,
-                                    nonblocking: listener.nonblocking,
-                                    read_timeout: None,
-                                    write_timeout: None,
+                                    nonblocking: Arc::new(AtomicBool::new(listener.nonblocking)),
+                                    read_timeout: Arc::new(RwLock::new(None)),
+                                    write_timeout: Arc::new(RwLock::new(None)),
                                 }),
                                 sadd,
                             )),
@@ -699,7 +802,7 @@ impl TcpStream {
     pub fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
         STCP_GLOBAL.connect_timeout(addr, timeout)
     }
-    pub fn set_read_timeout(&mut self, dur: Option<Duration>) -> io::Result<()> {
+    pub fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
         match self {
             TcpStream::Stcp(slf) => slf.set_read_timeout(dur),
             TcpStream::System(slf) => slf.set_read_timeout(dur),
@@ -711,7 +814,7 @@ impl TcpStream {
             TcpStream::System(slf) => slf.read_timeout(),
         }
     }
-    pub fn set_write_timeout(&mut self, dur: Option<Duration>) -> io::Result<()> {
+    pub fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
         match self {
             TcpStream::Stcp(slf) => slf.set_write_timeout(dur),
             TcpStream::System(slf) => slf.set_write_timeout(dur),
@@ -759,7 +862,7 @@ impl TcpStream {
             TcpStream::System(slf) => slf.take_error(),
         }
     }
-    pub fn set_nonblocking(&mut self, nonblocking: bool) -> io::Result<()> {
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         match self {
             TcpStream::Stcp(slf) => slf.set_nonblocking(nonblocking),
             TcpStream::System(slf) => slf.set_nonblocking(nonblocking),
@@ -808,10 +911,10 @@ impl TcpStream {
                     }
                     !socket.can_send()
                 } {
-                    if slf.nonblocking {
+                    if slf.nonblocking.load(Ordering::SeqCst) {
                         return Err(smoltcp::Error::Exhausted);
                     }
-                    match slf.write_timeout {
+                    match *slf.write_timeout.read() {
                         Some(timeout) => {
                             if cond.wait_until(&mut stcpnet, start + timeout).timed_out() {
                                 return Err(smoltcp::Error::Exhausted);
@@ -861,10 +964,10 @@ impl TcpStream {
                     }
                     !socket.can_recv()
                 } {
-                    if slf.nonblocking {
+                    if slf.nonblocking.load(Ordering::SeqCst) {
                         return Err(smoltcp::Error::Exhausted);
                     }
-                    match slf.read_timeout {
+                    match *slf.read_timeout.read() {
                         Some(timeout) => {
                             if cond.wait_until(&mut stcpnet, start + timeout).timed_out() {
                                 return Err(smoltcp::Error::Exhausted);
@@ -928,10 +1031,10 @@ impl StcpStream {
             }
             !socket.can_recv()
         } {
-            if self.nonblocking {
+            if self.nonblocking.load(Ordering::SeqCst) {
                 return Err(io::Error::new(io::ErrorKind::WouldBlock, "peek not ready"));
             }
-            match self.read_timeout {
+            match *self.read_timeout.read() {
                 Some(timeout) => {
                     if cond.wait_until(&mut stcpnet, start + timeout).timed_out() {
                         return Err(io::Error::new(io::ErrorKind::WouldBlock, "peek not ready"));
@@ -961,10 +1064,10 @@ impl StcpStream {
             }
             !socket.can_recv()
         } {
-            if self.nonblocking {
+            if self.nonblocking.load(Ordering::SeqCst) {
                 return Err(io::Error::new(io::ErrorKind::WouldBlock, "read not ready"));
             }
-            match self.read_timeout {
+            match *self.read_timeout.read() {
                 Some(timeout) => {
                     if cond.wait_until(&mut stcpnet, start + timeout).timed_out() {
                         return Err(io::Error::new(io::ErrorKind::WouldBlock, "read not ready"));
@@ -1006,10 +1109,10 @@ impl StcpStream {
             }
             !socket.can_send()
         } {
-            if self.nonblocking {
+            if self.nonblocking.load(Ordering::SeqCst) {
                 return Err(io::Error::new(io::ErrorKind::WouldBlock, "write not ready"));
             }
-            match self.write_timeout {
+            match *self.write_timeout.read() {
                 Some(timeout) => {
                     if cond.wait_until(&mut stcpnet, start + timeout).timed_out() {
                         return Err(io::Error::new(io::ErrorKind::WouldBlock, "write not ready"));
@@ -1035,19 +1138,19 @@ impl StcpStream {
         }
         r
     }
-    pub fn set_read_timeout(&mut self, dur: Option<Duration>) -> io::Result<()> {
-        self.read_timeout = dur;
+    pub fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        *self.read_timeout.write() = dur;
         Ok(())
     }
     pub fn read_timeout(&self) -> io::Result<Option<Duration>> {
-        Ok(self.read_timeout)
+        Ok(*self.read_timeout.read())
     }
-    pub fn set_write_timeout(&mut self, dur: Option<Duration>) -> io::Result<()> {
-        self.write_timeout = dur;
+    pub fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        *self.write_timeout.write() = dur;
         Ok(())
     }
     pub fn write_timeout(&self) -> io::Result<Option<Duration>> {
-        Ok(self.write_timeout)
+        Ok(*self.write_timeout.read())
     }
     pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
         if nodelay {
@@ -1065,8 +1168,8 @@ impl StcpStream {
     pub fn flush(&mut self) -> io::Result<()> {
         Ok(()) // because of nodelay
     }
-    pub fn set_nonblocking(&mut self, nonblocking: bool) -> io::Result<()> {
-        self.nonblocking = nonblocking;
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        self.nonblocking.store(nonblocking, Ordering::SeqCst);
         Ok(())
     }
     pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
@@ -1129,9 +1232,9 @@ impl StcpStream {
         Ok(StcpStream {
             stcpnet: self.stcpnet.clone(),
             sockethandle: self.sockethandle.clone(),
-            nonblocking: self.nonblocking,
-            read_timeout: self.read_timeout,
-            write_timeout: self.write_timeout,
+            nonblocking: self.nonblocking.clone(),
+            read_timeout: self.read_timeout.clone(),
+            write_timeout: self.write_timeout.clone(),
         })
     }
 }
@@ -1144,4 +1247,335 @@ fn endpoint_to_socket_addr(ep: &IpEndpoint) -> SocketAddr {
         IpAddress::__Nonexhaustive => panic!("not covered"),
     };
     SocketAddr::new(stip, ep.port)
+}
+
+// UDP
+
+pub struct UdpSocket {
+    stcpnet: StcpNetRef,
+    socket_handle: Option<SocketHandle>,
+    lo: SystemUdpSocket,
+    connected: Arc<RwLock<Option<SocketAddr>>>,
+    nonblocking: Arc<AtomicBool>,
+    read_timeout: Arc<RwLock<Option<Duration>>>,
+    write_timeout: Arc<RwLock<Option<Duration>>>,
+}
+
+impl Drop for UdpSocket {
+    fn drop(&mut self) {
+        let &(ref stcpnetref, ref _cond) = &*self.stcpnet.r;
+        let mut stcpnet = stcpnetref.lock();
+        stcpnet.fds_remove.push(self.lo.as_raw_fd());
+        if let Some(sockethandle) = self.socket_handle {
+            debug!("drop-closing UDP");
+            stcpnet.sockets.release(sockethandle);
+            stcpnet.sockets.prune();
+        }
+    }
+}
+
+impl UdpSocket {
+    pub fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<UdpSocket> {
+        STCP_GLOBAL.bind_udp(addr)
+    }
+    pub fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        self.peek_or_recv_from(true, buf)
+    }
+    fn peek_or_recv_from(&self, recv: bool, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        if self.socket_handle.is_none()
+            || match *self.connected.read() {
+                Some(sa) => sa.ip().is_loopback(),
+                None => false,
+            }
+        {
+            return if recv {
+                self.lo.recv_from(buf)
+            } else {
+                self.lo.peek_from(buf)
+            };
+        }
+        let socket_handle = self.socket_handle.unwrap();
+
+        let start = StdInstant::now();
+        let &(ref stcpnetref, ref cond) = &*self.stcpnet.r;
+        let mut stcpnet = stcpnetref.lock();
+        loop {
+            {
+                let mut socket = stcpnet.sockets.get::<SmoltcpUdpSocket>(socket_handle);
+                if socket.can_recv() {
+                    let r = if recv {
+                        socket.recv_slice(buf)
+                    } else {
+                        panic!("unimplemented peek_slice in smoltcp")
+                    };
+                    let r = r
+                        .map(|(read, addr)| (read, endpoint_to_socket_addr(&addr)))
+                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
+                    if let Some(ref conn_remote_addr) = *self.connected.read() {
+                        match &r {
+                            Ok((_, sockaddr)) => {
+                                if sockaddr != conn_remote_addr
+                                    && !(conn_remote_addr.ip().is_unspecified()
+                                        && conn_remote_addr.port() == 0)
+                                    && !(conn_remote_addr.ip().is_unspecified()
+                                        && sockaddr.port() == conn_remote_addr.port())
+                                    && !(conn_remote_addr.port() == 0
+                                        && conn_remote_addr.ip() == sockaddr.ip())
+                                {
+                                    continue;
+                                }
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                    return r;
+                }
+            }
+            if (*self.connected.read()).is_none() {
+                let sys_res = if recv {
+                    self.lo.recv_from(buf)
+                } else {
+                    self.lo.peek_from(buf)
+                };
+                if sys_res
+                    .as_ref()
+                    .err()
+                    .map(|e| e.kind() == io::ErrorKind::WouldBlock)
+                    != Some(true)
+                {
+                    return sys_res;
+                }
+            }
+            if self.nonblocking.load(Ordering::SeqCst) {
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, "recv not ready"));
+            }
+            match *self.read_timeout.read() {
+                Some(timeout) => {
+                    if cond.wait_until(&mut stcpnet, start + timeout).timed_out() {
+                        return Err(io::Error::new(io::ErrorKind::WouldBlock, "recv not ready"));
+                    }
+                }
+                None => {
+                    cond.wait(&mut stcpnet);
+                }
+            }
+        }
+    }
+    pub fn peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        self.peek_or_recv_from(false, buf)
+    }
+    pub fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], addr: A) -> io::Result<usize> {
+        let addr = addr
+            .to_socket_addrs()?
+            .next()
+            .ok_or(io::Error::new(io::ErrorKind::Other, "to sock addr empty"))?;
+        if self.socket_handle.is_none() || addr.ip().is_loopback() {
+            if self.socket_handle.is_some() && !self.nonblocking.load(Ordering::SeqCst) {
+                self.lo.set_nonblocking(false)?;
+            }
+            let r = self.lo.send_to(buf, addr);
+            if self.socket_handle.is_some() && !self.nonblocking.load(Ordering::SeqCst) {
+                self.set_nonblocking(self.nonblocking.load(Ordering::SeqCst))?;
+            }
+            return r;
+        }
+        let socket_handle = self.socket_handle.unwrap();
+
+        let start = StdInstant::now();
+        let &(ref stcpnetref, ref cond) = &*self.stcpnet.r;
+        let mut stcpnet = stcpnetref.lock();
+        loop {
+            let mut r = None;
+            {
+                let mut socket = stcpnet.sockets.get::<SmoltcpUdpSocket>(socket_handle);
+                if socket.can_send() {
+                    r = Some(
+                        socket
+                            .send_slice(buf, addr.into())
+                            .map(|_| buf.len())
+                            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string())),
+                    );
+                }
+            }
+            if let Some(r) = r {
+                if stcpnet.bg_skip_one_wait == Skip::Wait {
+                    let _ = stcpnet.notify_poll.send(b"$").unwrap();
+                } else {
+                    stcpnet.bg_skip_one_wait = Skip::Skip;
+                }
+                return r;
+            }
+            if self.nonblocking.load(Ordering::SeqCst) {
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, "send not ready"));
+            }
+            match *self.read_timeout.read() {
+                Some(timeout) => {
+                    if cond.wait_until(&mut stcpnet, start + timeout).timed_out() {
+                        return Err(io::Error::new(io::ErrorKind::WouldBlock, "send not ready"));
+                    }
+                }
+                None => {
+                    cond.wait(&mut stcpnet);
+                }
+            }
+        }
+    }
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        match self.socket_handle {
+            None => {
+                return self.lo.local_addr();
+            }
+            Some(ref handle) => {
+                let &(ref stcpnetref, ref _cond) = &*self.stcpnet.r;
+                let mut stcpnet = stcpnetref.lock();
+                let socket = stcpnet.sockets.get::<SmoltcpUdpSocket>(*handle);
+                let local = socket.endpoint();
+                Ok(endpoint_to_socket_addr(&local))
+            }
+        }
+    }
+    pub fn try_clone(&self) -> io::Result<UdpSocket> {
+        let &(ref stcpnetref, ref _cond) = &*self.stcpnet.r;
+        let mut stcpnet = stcpnetref.lock();
+        if let Some(socket_handle) = self.socket_handle {
+            stcpnet.sockets.retain(socket_handle); // cloning needs to increase the ref count
+        }
+        Ok(UdpSocket {
+            stcpnet: self.stcpnet.clone(),
+            socket_handle: self.socket_handle.clone(),
+            lo: self.lo.try_clone()?,
+            connected: self.connected.clone(),
+            nonblocking: self.nonblocking.clone(),
+            read_timeout: self.read_timeout.clone(),
+            write_timeout: self.write_timeout.clone(),
+        })
+    }
+    pub fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        *self.read_timeout.write() = dur;
+        self.lo.set_read_timeout(*self.read_timeout.read())
+    }
+    pub fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        *self.write_timeout.write() = dur;
+        self.lo.set_write_timeout(*self.write_timeout.read())
+    }
+    pub fn read_timeout(&self) -> io::Result<Option<Duration>> {
+        Ok(*self.read_timeout.read())
+    }
+    pub fn write_timeout(&self) -> io::Result<Option<Duration>> {
+        Ok(*self.write_timeout.read())
+    }
+    pub fn set_broadcast(&self, broadcast: bool) -> io::Result<()> {
+        panic!("unimpl")
+    }
+    pub fn broadcast(&self) -> io::Result<bool> {
+        panic!("unimpl")
+    }
+    pub fn set_multicast_loop_v4(&self, multicast_loop_v4: bool) -> io::Result<()> {
+        panic!("unimpl")
+    }
+    pub fn multicast_loop_v4(&self) -> io::Result<bool> {
+        panic!("unimpl")
+    }
+    pub fn set_multicast_ttl_v4(&self, multicast_ttl_v4: u32) -> io::Result<()> {
+        panic!("unimpl")
+    }
+    pub fn multicast_ttl_v4(&self) -> io::Result<u32> {
+        panic!("unimpl")
+    }
+    pub fn set_multicast_loop_v6(&self, multicast_loop_v6: bool) -> io::Result<()> {
+        panic!("unimpl")
+    }
+    pub fn multicast_loop_v6(&self) -> io::Result<bool> {
+        panic!("unimpl")
+    }
+    pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
+        if let Some(socket_handle) = self.socket_handle {
+            let &(ref stcpnetref, ref _cond) = &*self.stcpnet.r;
+            let mut stcpnet = stcpnetref.lock();
+            let mut socket = stcpnet.sockets.get::<SmoltcpUdpSocket>(socket_handle);
+            socket.set_hop_limit(Some(ttl as u8));
+        }
+        self.lo.set_ttl(ttl)
+    }
+    pub fn ttl(&self) -> io::Result<u32> {
+        self.lo.ttl()
+    }
+    pub fn join_multicast_v4(&self, multiaddr: &Ipv4Addr, interface: &Ipv4Addr) -> io::Result<()> {
+        panic!("unimpl")
+    }
+    pub fn join_multicast_v6(&self, multiaddr: &Ipv6Addr, interface: u32) -> io::Result<()> {
+        panic!("unimpl")
+    }
+    pub fn leave_multicast_v4(&self, multiaddr: &Ipv4Addr, interface: &Ipv4Addr) -> io::Result<()> {
+        panic!("unimpl")
+    }
+    pub fn leave_multicast_v6(&self, multiaddr: &Ipv6Addr, interface: u32) -> io::Result<()> {
+        panic!("unimpl")
+    }
+    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        self.lo.take_error()
+    }
+    pub fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<()> {
+        let addr = addr
+            .to_socket_addrs()?
+            .next()
+            .ok_or(io::Error::new(io::ErrorKind::Other, "to sock addr empty"))?;
+        if !self.nonblocking.load(Ordering::SeqCst) {
+            self.lo.set_nonblocking(addr.ip().is_loopback())?;
+        }
+
+        let &(ref stcpnetref, ref _cond) = &*self.stcpnet.r;
+        let stcpnet = stcpnetref.lock();
+        let ipv4 = stcpnet.iface.ips()[0].address();
+        if addr.ip().is_loopback() || IpAddress::from(addr.ip()) == ipv4 {
+            *self.connected.write() = Some(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                addr.port(),
+            ));
+            self.lo.connect(addr)
+        } else {
+            *self.connected.write() = Some(addr.clone());
+            Ok(())
+        }
+    }
+    pub fn send(&self, buf: &[u8]) -> io::Result<usize> {
+        match *self.connected.read() {
+            Some(c) => self.send_to(buf, c),
+            None => Err(io::Error::new(io::ErrorKind::InvalidInput, "not connected")),
+        }
+    }
+    pub fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        if (*self.connected.read()).is_none() {
+            Err(io::Error::new(io::ErrorKind::InvalidInput, "not connected"))
+        } else {
+            self.recv_from(buf).map(|(r, _)| r)
+        }
+    }
+    pub fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
+        if (*self.connected.read()).is_none() {
+            Err(io::Error::new(io::ErrorKind::InvalidInput, "not connected"))
+        } else {
+            self.peek_from(buf).map(|(r, _)| r)
+        }
+    }
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        match *self.connected.read() {
+            Some(addr) => {
+                self.lo.set_nonblocking(if !nonblocking {
+                    !addr.ip().is_loopback()
+                } else {
+                    true
+                })?;
+            }
+            None => {
+                self.lo.set_nonblocking(if self.socket_handle.is_some() {
+                    true
+                } else {
+                    nonblocking
+                })?;
+            }
+        }
+        self.nonblocking.store(nonblocking, Ordering::SeqCst);
+        Ok(())
+    }
 }

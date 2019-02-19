@@ -23,7 +23,7 @@ pub mod device;
 pub mod system;
 
 #[cfg(feature = "multi")]
-pub use apimultithread::{TcpListener, TcpStream};
+pub use apimultithread::{TcpListener, TcpStream, UdpSocket};
 
 #[cfg(feature = "single")]
 pub use apisinglethread::{TcpListener, TcpStream};

@@ -109,13 +109,12 @@ The socket types will transparently listen on and connect to the loopback interf
 
 # TODO
 
-* UDP
-* IPv6
-* DNS (currently uses the standard library to resolve names)
+* UDP broadcast, multicast, configurable max packet number for buffer, and zero-copy variants for recv_from, send_to, peak_from, send, recv, peek
+* IPv6, and then run all tests from https://github.com/rust-lang/rust/blob/master/src/libstd/net/tcp.rs
+* DNS with custom to_socket_addrs() function (currently uses the standard library to resolve names)
 * See smoltcp list of unimplemented features (congestion control, IP fragmentation, path MTU discovery, probing zero windows, DHCP, selective/delayed ACKs, avoiding silly window syndrome, Nagle's algorithm, …)
 * Multiple IP addresses per NIC
 * Multiple NICs and routing
 * Support epoll for porting mio/Tokio and provide a custom RawFd type (conversion to and from RawFds however should still not be possible)
 * Better multithreading usage: Fine-grained locking for smoltcp, optimized unblocking of application threads, multiple background threads
 * Deregister port matches on drop/prune
-* Implement all the functions that TcpStream has: read/write timeout, peek, TTL, nonblocking

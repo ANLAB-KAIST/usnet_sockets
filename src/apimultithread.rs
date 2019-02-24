@@ -8,13 +8,20 @@
 use parking_lot::{Condvar, Mutex, RwLock};
 use smoltcp::time::Instant;
 use std::io::{self, Write};
+use std::iter;
+use std::net::{SocketAddrV4, SocketAddrV6};
+use std::option;
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::slice;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant as StdInstant};
+use std::vec;
+
+use resolve;
 
 use smoltcp;
 use smoltcp::socket::{
@@ -25,7 +32,7 @@ use smoltcp::wire::{IpAddress, IpEndpoint, IpProtocol};
 
 use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener as SystemTcpListener,
-    TcpStream as SystemTcpStream, ToSocketAddrs, UdpSocket as SystemUdpSocket,
+    TcpStream as SystemTcpStream, UdpSocket as SystemUdpSocket,
 };
 use std::os::unix::net::UnixDatagram;
 
@@ -34,12 +41,12 @@ use nix::sched::{sched_setaffinity, CpuSet};
 use nix::unistd::Pid;
 use std::os::raw::c_int;
 
-use config::*;
 use device::*;
 use rand::{thread_rng, Rng};
 use std::env;
 use std::io::prelude::*;
 use system::read_kernel_local_port_range;
+use usnetconfig::*;
 
 use serde_json;
 
@@ -142,7 +149,7 @@ pub fn bg() {
 pub struct TcpListener {}
 
 impl TcpListener {
-    pub fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<StcpListenerRef> {
+    pub fn bind<A: UsnetToSocketAddrs>(addr: A) -> io::Result<StcpListenerRef> {
         STCP_GLOBAL.bind(addr)
     }
 }
@@ -264,12 +271,12 @@ impl StcpNet {
 }
 
 impl StcpNetRef {
-    fn bind<A: ToSocketAddrs>(&self, addr: A) -> io::Result<StcpListenerRef> {
+    fn bind<A: UsnetToSocketAddrs>(&self, addr: A) -> io::Result<StcpListenerRef> {
         let mut r = Err(io::Error::new(
             io::ErrorKind::Other,
             "to_socket_addrs is empty",
         ));
-        for mut sockaddr in addr.to_socket_addrs()? {
+        for mut sockaddr in addr.usnet_to_socket_addrs()? {
             let ipa = sockaddr.ip();
             if !ipa.is_loopback() && ipa.is_ipv6() {
                 r = Err(io::Error::new(io::ErrorKind::Other, "ipv6 bind"));
@@ -361,10 +368,10 @@ impl StcpNetRef {
     fn connect_timeout(&self, addr: &SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
         self.connect_timeout_opt(addr, Some(timeout))
     }
-    fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<TcpStream> {
+    fn connect<A: UsnetToSocketAddrs>(&self, addr: A) -> io::Result<TcpStream> {
         self.connect_timeout_opt(addr, None)
     }
-    fn connect_timeout_opt<A: ToSocketAddrs>(
+    fn connect_timeout_opt<A: UsnetToSocketAddrs>(
         &self,
         addr: A,
         timeout: Option<Duration>,
@@ -373,7 +380,7 @@ impl StcpNetRef {
             io::ErrorKind::Other,
             "to_socket_addrs is empty",
         ));
-        for addr in addr.to_socket_addrs()? {
+        for addr in addr.usnet_to_socket_addrs()? {
             let mut error = false;
             let tcp_handle;
             {
@@ -487,12 +494,12 @@ impl StcpNetRef {
         }
         r
     }
-    fn bind_udp<A: ToSocketAddrs>(&self, addr: A) -> io::Result<UdpSocket> {
+    fn bind_udp<A: UsnetToSocketAddrs>(&self, addr: A) -> io::Result<UdpSocket> {
         let mut r = Err(io::Error::new(
             io::ErrorKind::Other,
             "to_socket_addrs is empty",
         ));
-        for mut sockaddr in addr.to_socket_addrs()? {
+        for mut sockaddr in addr.usnet_to_socket_addrs()? {
             let ipa = sockaddr.ip();
             if !ipa.is_loopback() && ipa.is_ipv6() {
                 r = Err(io::Error::new(io::ErrorKind::Other, "ipv6 bind"));
@@ -796,7 +803,7 @@ impl Write for TcpStream {
 }
 
 impl TcpStream {
-    pub fn connect<A: ToSocketAddrs>(addr: A) -> io::Result<TcpStream> {
+    pub fn connect<A: UsnetToSocketAddrs>(addr: A) -> io::Result<TcpStream> {
         STCP_GLOBAL.connect(addr)
     }
     pub fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
@@ -1275,7 +1282,7 @@ impl Drop for UdpSocket {
 }
 
 impl UdpSocket {
-    pub fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<UdpSocket> {
+    pub fn bind<A: UsnetToSocketAddrs>(addr: A) -> io::Result<UdpSocket> {
         STCP_GLOBAL.bind_udp(addr)
     }
     pub fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
@@ -1364,9 +1371,9 @@ impl UdpSocket {
     pub fn peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         self.peek_or_recv_from(false, buf)
     }
-    pub fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], addr: A) -> io::Result<usize> {
+    pub fn send_to<A: UsnetToSocketAddrs>(&self, buf: &[u8], addr: A) -> io::Result<usize> {
         let addr = addr
-            .to_socket_addrs()?
+            .usnet_to_socket_addrs()?
             .next()
             .ok_or(io::Error::new(io::ErrorKind::Other, "to sock addr empty"))?;
         if self.socket_handle.is_none() || addr.ip().is_loopback() {
@@ -1515,9 +1522,9 @@ impl UdpSocket {
     pub fn take_error(&self) -> io::Result<Option<io::Error>> {
         self.lo.take_error()
     }
-    pub fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<()> {
+    pub fn connect<A: UsnetToSocketAddrs>(&self, addr: A) -> io::Result<()> {
         let addr = addr
-            .to_socket_addrs()?
+            .usnet_to_socket_addrs()?
             .next()
             .ok_or(io::Error::new(io::ErrorKind::Other, "to sock addr empty"))?;
         if !self.nonblocking.load(Ordering::SeqCst) {
@@ -1577,5 +1584,140 @@ impl UdpSocket {
         }
         self.nonblocking.store(nonblocking, Ordering::SeqCst);
         Ok(())
+    }
+}
+
+// unfortunately need to port Rust std lib type from /src/std/net/addr.rs (copyright MIT/Apache 2.0, see https://thanks.rust-lang.org)
+pub trait UsnetToSocketAddrs {
+    type Iter: Iterator<Item = SocketAddr>;
+    fn usnet_to_socket_addrs(&self) -> io::Result<Self::Iter>;
+}
+
+fn usnet_resolve_socket_addr(s: &str, p: u16) -> io::Result<vec::IntoIter<SocketAddr>> {
+    if let Ok(hostname) = resolve::hostname::get_hostname() {
+        if hostname == s {
+            return Ok(
+                vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), p)].into_iter(),
+            );
+        }
+    }
+    if let Ok(etc_hosts) = resolve::hosts::load_hosts(&resolve::hosts::host_file()) {
+        if let Some(addr) = etc_hosts.find_address(s) {
+            return Ok(vec![SocketAddr::new(addr, p)].into_iter());
+        }
+    }
+    let config = resolve::DnsConfig::with_name_servers(vec![
+        "1.1.1.1:53".parse().unwrap(),
+        "1.0.0.1:53".parse().unwrap(),
+    ]);
+    let resolver = resolve::DnsResolver::new(config)?;
+    let ips = resolver.resolve_host(s)?;
+    let v: Vec<_> = ips.map(|a| SocketAddr::new(a, p)).collect();
+    Ok(v.into_iter())
+}
+
+impl UsnetToSocketAddrs for String {
+    type Iter = vec::IntoIter<SocketAddr>;
+    fn usnet_to_socket_addrs(&self) -> io::Result<vec::IntoIter<SocketAddr>> {
+        (&**self).usnet_to_socket_addrs()
+    }
+}
+
+impl<'a, T: UsnetToSocketAddrs + ?Sized> UsnetToSocketAddrs for &'a T {
+    type Iter = T::Iter;
+    fn usnet_to_socket_addrs(&self) -> io::Result<T::Iter> {
+        (**self).usnet_to_socket_addrs()
+    }
+}
+impl<'a> UsnetToSocketAddrs for &'a [SocketAddr] {
+    type Iter = iter::Cloned<slice::Iter<'a, SocketAddr>>;
+
+    fn usnet_to_socket_addrs(&self) -> io::Result<Self::Iter> {
+        Ok(self.iter().cloned())
+    }
+}
+impl<'a> UsnetToSocketAddrs for (&'a str, u16) {
+    type Iter = vec::IntoIter<SocketAddr>;
+    fn usnet_to_socket_addrs(&self) -> io::Result<vec::IntoIter<SocketAddr>> {
+        let (host, port) = *self;
+
+        // try to parse the host as a regular IP address first
+        if let Ok(addr) = host.parse::<Ipv4Addr>() {
+            let addr = SocketAddrV4::new(addr, port);
+            return Ok(vec![SocketAddr::V4(addr)].into_iter());
+        }
+        if let Ok(addr) = host.parse::<Ipv6Addr>() {
+            let addr = SocketAddrV6::new(addr, port, 0, 0);
+            return Ok(vec![SocketAddr::V6(addr)].into_iter());
+        }
+
+        usnet_resolve_socket_addr(host, port)
+    }
+}
+impl UsnetToSocketAddrs for (IpAddr, u16) {
+    type Iter = option::IntoIter<SocketAddr>;
+    fn usnet_to_socket_addrs(&self) -> io::Result<option::IntoIter<SocketAddr>> {
+        let (ip, port) = *self;
+        match ip {
+            IpAddr::V4(ref a) => (*a, port).usnet_to_socket_addrs(),
+            IpAddr::V6(ref a) => (*a, port).usnet_to_socket_addrs(),
+        }
+    }
+}
+impl UsnetToSocketAddrs for SocketAddrV6 {
+    type Iter = option::IntoIter<SocketAddr>;
+    fn usnet_to_socket_addrs(&self) -> io::Result<option::IntoIter<SocketAddr>> {
+        SocketAddr::V6(*self).usnet_to_socket_addrs()
+    }
+}
+impl UsnetToSocketAddrs for SocketAddrV4 {
+    type Iter = option::IntoIter<SocketAddr>;
+    fn usnet_to_socket_addrs(&self) -> io::Result<option::IntoIter<SocketAddr>> {
+        SocketAddr::V4(*self).usnet_to_socket_addrs()
+    }
+}
+impl UsnetToSocketAddrs for SocketAddr {
+    type Iter = option::IntoIter<SocketAddr>;
+    fn usnet_to_socket_addrs(&self) -> io::Result<option::IntoIter<SocketAddr>> {
+        Ok(Some(*self).into_iter())
+    }
+}
+impl UsnetToSocketAddrs for (Ipv6Addr, u16) {
+    type Iter = option::IntoIter<SocketAddr>;
+    fn usnet_to_socket_addrs(&self) -> io::Result<option::IntoIter<SocketAddr>> {
+        let (ip, port) = *self;
+        SocketAddrV6::new(ip, port, 0, 0).usnet_to_socket_addrs()
+    }
+}
+impl UsnetToSocketAddrs for (Ipv4Addr, u16) {
+    type Iter = option::IntoIter<SocketAddr>;
+    fn usnet_to_socket_addrs(&self) -> io::Result<option::IntoIter<SocketAddr>> {
+        let (ip, port) = *self;
+        SocketAddrV4::new(ip, port).usnet_to_socket_addrs()
+    }
+}
+impl UsnetToSocketAddrs for str {
+    type Iter = vec::IntoIter<SocketAddr>;
+    fn usnet_to_socket_addrs(&self) -> io::Result<vec::IntoIter<SocketAddr>> {
+        // try to parse as a regular SocketAddr first
+        if let Some(addr) = self.parse().ok() {
+            return Ok(vec![addr].into_iter());
+        }
+
+        macro_rules! try_opt {
+            ($e:expr, $msg:expr) => {
+                match $e {
+                    Some(r) => r,
+                    None => return Err(io::Error::new(io::ErrorKind::InvalidInput, $msg)),
+                }
+            };
+        }
+
+        // split the string by ':' and convert the second part to u16
+        let mut parts_iter = self.rsplitn(2, ':');
+        let port_str = try_opt!(parts_iter.next(), "invalid socket address");
+        let host = try_opt!(parts_iter.next(), "invalid socket address");
+        let port: u16 = try_opt!(port_str.parse().ok(), "invalid port value");
+        usnet_resolve_socket_addr(host, port)
     }
 }

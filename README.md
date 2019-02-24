@@ -16,6 +16,11 @@ Unsafe Rust code is used for packet transfer with netmap, macvtap syscalls, and 
 
 Netmap support is an optional build feature. It can be used for direct NIC access or for faster IPC channels to usnetd through netmap pipes instead of Unix domain sockets.
 
+A limitation with macvtap that does not exists with real netmap drivers is that kernel RAW sockets will still see traffic on the interface.
+This means that dhclient listening on the real interface may still be exposed to untrusted traffic.
+Another problem with macvtap and the new virtual TAP interface for the kernel is that dhclient and wpasupplicant try to use the real interface where sending is blocked, thus after some time an encrypted WiFi connection may break.
+Therefore, netmap is the recommended backend.
+
 ## Porting Rust code
 
 It is recommendable to introduce support for usnet_sockets through conditional compilation with a build feature flag.
@@ -47,6 +52,9 @@ If your project just depends on a library that was ported to use `usnet_sockets`
     tiny_http = { git = "https://../tiny-http" }
 
 This patching also works for dependencies of dependencies, so that you could directly do this in your own project that uses, e.g., the web framework rouille instead of doing this step first for rouille and then add the above step with rouille instead of tiny_http for your project.
+
+If the code uses .to_socket_addrs() before calling into the library then this call will still use the system's resolver.
+Therefore, after importing UsnetToSocketAddrs, .usnet_to_socket_addrs() must be used for an internal memory-safe resolution.
 
 ## Other build flags of the library
 The library has a `host` build flag just reexports the Rust standard library types. This is useful to debug code or avoid conditional compilation when porting some Rust code. However, the library still provides userspace networking types under `usnet_sockets::apimultithread::{TcpListener, TcpStream}`. Only if this would be disabled with maybe a build flag `onlyhost`, a full port to usnet_sockets would not compromise portability to non-Linux systems – this seems to be a good solution but was not implemented yet.
@@ -109,9 +117,9 @@ The socket types will transparently listen on and connect to the loopback interf
 
 # TODO
 
+* Configurable DNS servers
 * UDP broadcast, multicast, configurable max packet number for buffer, and zero-copy variants for recv_from, send_to, peak_from, send, recv, peek
 * IPv6, and then run all tests from https://github.com/rust-lang/rust/blob/master/src/libstd/net/tcp.rs
-* DNS with custom to_socket_addrs() function (currently uses the standard library to resolve names)
 * See smoltcp list of unimplemented features (congestion control, IP fragmentation, path MTU discovery, probing zero windows, DHCP, selective/delayed ACKs, avoiding silly window syndrome, Nagle's algorithm, …)
 * Multiple IP addresses per NIC
 * Multiple NICs and routing

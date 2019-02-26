@@ -7,7 +7,7 @@ At runtime it accesses the NIC either through macvtap (dedicated NIC or L2 bridg
 It is intended to be used in combination with [usnetd](https://github.com/ANLAB-KAIST/usnetd), a switch system service that allows to share a NIC and IP address for multiple memory-safe network stacks and the kernel network stack.
 This combination easily expands the memory-safety of existing Rust web services to the TCP/IP layer with low porting efforts by just changing the import statements.
 
-Code for evaluation is in the usnetd repository. While 10 GBit/s TCP transfer on a 10G NIC is possible on a fast system, a slower system may have a degraded performance of 2 GBit/s.
+Code for evaluation is in the [usnetd](https://github.com/ANLAB-KAIST/usnetd) repository. While 10 GBit/s TCP transfer on a 10G NIC is possible on a fast system, a slower system may have a degraded performance of 2 GBit/s.
 The single-thread version of the API could get half of the line-rate when usnetd was not used.
 Currently smoltcp does not implement several TCP aspects which would make it more robust against packet loss.
 Accepting and answering parallel short TCP connections is not as fast as with the Linux kernel network stack.
@@ -18,13 +18,15 @@ Netmap support is an optional build feature. It can be used for direct NIC acces
 
 A limitation with macvtap that does not exists with real netmap drivers is that kernel RAW sockets will still see traffic on the interface.
 This means that dhclient listening on the real interface may still be exposed to untrusted traffic.
-Another problem with macvtap and the new virtual TAP interface for the kernel is that dhclient and wpasupplicant try to use the real interface where sending is blocked, thus after some time an encrypted WiFi connection may break.
-Therefore, netmap is the recommended backend.
+Another problem with macvtap (and the new virtual TAP interface for the kernel if usnetd in macvtap mode is used) is that dhclient and wpasupplicant try to use the real interface where sending is blocked, thus after some time an encrypted WiFi connection may break.
+Therefore, usnetd on netmap is the recommended backend.
 
 ## Porting Rust code
 
 It is recommendable to introduce support for usnet_sockets through conditional compilation with a build feature flag.
 This gives users of your network service the choice if they want to use userspace networking or not (only Linux is supported).
+
+Example ports of Rust libraries which can use usnet_sockets through a `usnet` feature flag are in the `usnet` branches of [tiny-http](https://github.com/pothos/tiny-http) and [rouille](https://github.com/pothos/rouille).
 
 Add a new build feature to your `Cargo.toml` file:
 

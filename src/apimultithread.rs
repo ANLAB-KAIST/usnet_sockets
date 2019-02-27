@@ -50,11 +50,12 @@ use usnetconfig::*;
 
 use serde_json;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StcpNetRef {
     pub r: Arc<(Mutex<StcpNet>, Condvar)>,
 }
 
+#[derive(Debug)]
 pub struct StcpListenerRef {
     pub l: Arc<Mutex<StcpListener>>,
 }
@@ -146,6 +147,7 @@ pub fn bg() {
     }
 }
 
+#[derive(Debug)]
 pub struct TcpListener {}
 
 impl TcpListener {
@@ -154,13 +156,14 @@ impl TcpListener {
     }
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Debug)]
 enum Skip {
     Wait,
     Skippable,
     Skip,
 }
 
+#[derive(Debug)]
 pub struct StcpNet {
     sockets: SocketSet<'static, 'static, 'static>,
     iface: StcpBackendInterface,
@@ -595,6 +598,7 @@ impl StcpNetRef {
     }
 }
 
+#[derive(Debug)]
 pub struct StcpListener {
     stcpnet: StcpNetRef,
     listen_handles: Option<Vec<SocketHandle>>,
@@ -619,6 +623,7 @@ impl Drop for StcpListener {
     }
 }
 
+#[derive(Debug)]
 pub struct StcpStream {
     stcpnet: StcpNetRef,
     sockethandle: SocketHandle,
@@ -1257,7 +1262,7 @@ fn endpoint_to_socket_addr(ep: &IpEndpoint) -> SocketAddr {
 }
 
 // UDP
-
+#[derive(Debug)]
 pub struct UdpSocket {
     stcpnet: StcpNetRef,
     socket_handle: Option<SocketHandle>,

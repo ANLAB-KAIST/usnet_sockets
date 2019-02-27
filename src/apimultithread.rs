@@ -1313,7 +1313,7 @@ impl UdpSocket {
                     let r = if recv {
                         socket.recv_slice(buf)
                     } else {
-                        panic!("unimplemented peek_slice in smoltcp")
+                        socket.peek_slice(buf).map(|(r, e)| (r, e.clone()))
                     };
                     let r = r
                         .map(|(read, addr)| (read, endpoint_to_socket_addr(&addr)))
@@ -1721,3 +1721,4 @@ impl UsnetToSocketAddrs for str {
         usnet_resolve_socket_addr(host, port)
     }
 }
+// port of /src/std/net/addr.rs ends here (copyright MIT/Apache 2.0, see https://thanks.rust-lang.org)

@@ -5,7 +5,7 @@ authors = ["Kai Lüke <kailueke@riseup.net>"]
 license = "MIT"
 
 [dependencies]
-smoltcp = { git = "https://github.com/m-labs/smoltcp" }
+smoltcp = "0.7"
 usnet_devices = { git = "https://github.com/ANLAB-KAIST/usnet_devices" }
 usnetd = { git = "https://github.com/ANLAB-KAIST/usnetd" }
 log = { version = "0.4.0", features = ["release_max_level_debug"] }

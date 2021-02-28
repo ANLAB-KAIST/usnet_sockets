@@ -65,7 +65,7 @@ impl TcpListener {
 }
 
 pub struct StcpNet {
-    sockets: SocketSet<'static, 'static, 'static>,
+    sockets: SocketSet<'static>,
     iface: StcpBackendInterface,
     fd: RawFd,
     waiting_poll: bool,

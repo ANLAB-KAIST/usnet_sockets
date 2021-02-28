@@ -165,7 +165,7 @@ enum Skip {
 
 #[derive(Debug)]
 pub struct StcpNet {
-    sockets: SocketSet<'static, 'static, 'static>,
+    sockets: SocketSet<'static>,
     iface: StcpBackendInterface,
     bg: JoinHandle<()>,
     fd: RawFd,
@@ -422,7 +422,7 @@ impl StcpNetRef {
                         IpAddress::Ipv4(v) => IpAddr::V4(Ipv4Addr::from(v)),
                         IpAddress::Ipv6(v) => IpAddr::V6(Ipv6Addr::from(v)),
                         IpAddress::Unspecified => IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
-                        IpAddress::__Nonexhaustive => panic!("not covered"),
+                        _ => panic!("not covered"),
                     };
                     if stcpnet
                         .iface
@@ -1256,7 +1256,7 @@ fn endpoint_to_socket_addr(ep: &IpEndpoint) -> SocketAddr {
         IpAddress::Ipv4(v) => IpAddr::V4(Ipv4Addr::from(v)),
         IpAddress::Ipv6(v) => IpAddr::V6(Ipv6Addr::from(v)),
         IpAddress::Unspecified => IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
-        IpAddress::__Nonexhaustive => panic!("not covered"),
+        _ => panic!("not covered"),
     };
     SocketAddr::new(stip, ep.port)
 }

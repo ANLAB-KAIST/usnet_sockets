@@ -23,26 +23,26 @@ extern crate libusnetd;
 use self::libusnetd::{ClientMessage, ClientMessageIp, WantMsg, SOCKET_PATH};
 
 pub enum StcpBackendInterface {
-    Raw(EthernetInterface<'static, 'static, 'static, RawSocket>),
+    Raw(EthernetInterface<'static, RawSocket>),
     Tap {
-        interface: EthernetInterface<'static, 'static, 'static, TapInterface>,
+        interface: EthernetInterface<'static, TapInterface>,
         destroy: Option<String>,
     },
     MacVtap {
-        interface: EthernetInterface<'static, 'static, 'static, TapInterface>,
+        interface: EthernetInterface<'static, TapInterface>,
         destroy: Option<String>,
     },
     #[cfg(feature = "netmap")]
     Netmap {
-        interface: EthernetInterface<'static, 'static, 'static, Netmap>,
+        interface: EthernetInterface<'static, Netmap>,
     },
     UsnetUds {
-        interface: EthernetInterface<'static, 'static, 'static, UnixDomainSocket>,
+        interface: EthernetInterface<'static, UnixDomainSocket>,
         control: UnixDatagram,
     },
     #[cfg(feature = "netmap")]
     UsnetNetmap {
-        interface: EthernetInterface<'static, 'static, 'static, Netmap>,
+        interface: EthernetInterface<'static, Netmap>,
         control: UnixDatagram,
     },
 }
